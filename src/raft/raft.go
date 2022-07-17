@@ -130,7 +130,7 @@ const (
 const (
 	ElectionMinWait  int = 150
 	ElectionMaxWait  int = 300
-	HearBeatTick     int = 250
+	HearBeatTick     int = 350
 	HeartBeatTimeOut int = 500
 )
 
@@ -166,6 +166,8 @@ type Raft struct {
 	state            ServerState
 	alreadRecivedRpc bool
 	voteCount        int
+	replyCount       int
+	voteTerm         int
 }
 
 // return currentTerm and whether this server
@@ -180,7 +182,7 @@ func (rf *Raft) GetState() (int, bool) {
 	term = rf.currentTerm
 	isleader = rf.state == Leader
 
-	LogPrint(dVote, "S%d isLeader %v", rf.me, isleader)
+	LogPrint(dVote, "S%d isLeader %v  ----- %v", rf.me, isleader, term)
 	return term, isleader
 }
 
@@ -278,29 +280,37 @@ type AppendEntriesReply struct {
 func (rf *Raft) RequestOthersVoteMe(argsList []RequestVoteArgs, replayList []RequestVoteReply) {
 	for i, _ := range rf.peers {
 		if i != rf.me {
-			rf.sendRequestVote(i, &argsList[i], &replayList[i])
+			LogPrint(dVote, "S%v on term %v sendRequestVote to S%v", rf.me, rf.currentTerm, i)
+			ok := rf.sendRequestVote(i, &argsList[i], &replayList[i])
+			if !ok {
+				LogPrint(dVote, "S%v Can't Recive Vote From S%v", rf.me, i)
+				continue
+			}
+
 			rf.mu.Lock()
-			if rf.state != Candidate {
+			rf.replyCount++
+			if rf.state != Candidate || rf.alreadRecivedRpc {
 				rf.mu.Unlock()
-				break
-			}
-
-			rf.currentTerm = replayList[i].Term
-			if replayList[i].VoteGranted {
-				rf.voteCount++
-				LogPrint(dVote, "S%v get vote from S%v. Vote is %v", rf.me, i, rf.voteCount)
-
-			}
-			if rf.voteCount > (len(rf.peers) / 2) {
-				LogPrint(dVote, "S%v became a leader!!!!!!!!", rf.me)
-				rf.state = Leader
-				rf.mu.Unlock()
-				rf.SendAllAppendEntries()
 				return
 			}
 
+			// rf.currentTerm = replayList[i].Term
+			if replayList[i].VoteGranted {
+				rf.voteCount++
+				LogPrint(dVote, "S%v get vote from S%v. Vote is %v", rf.me, i, rf.voteCount)
+			}
 			rf.mu.Unlock()
 		}
+	}
+
+	rf.mu.Lock()
+	LogPrint(dVote, "========== S%v got %v votes from %v", rf.me, rf.voteCount, rf.replyCount)
+	if rf.voteCount >= ((rf.replyCount + 1) / 2) {
+		LogPrint(dVote, "S%v became a leader!!!!!!!!", rf.me)
+		rf.state = Leader
+		rf.votedFor = -1
+		rf.mu.Unlock()
+		go rf.SendAllAppendEntries()
 	}
 }
 
@@ -330,9 +340,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.mu.Unlock()
 	LogPrint(dVote, "S%v in stage %v recive from S%v request vote in stage %v.", rf.me, rf.currentTerm, args.CandidateId, args.Term)
 
-	if rf.votedFor == -1 {
+	if rf.voteTerm < args.Term {
 		LogPrint(dVote, "S%v  vote for S%v", rf.me, args.CandidateId)
-		rf.currentTerm = args.Term
+		rf.voteTerm = args.Term
 		rf.votedFor = args.CandidateId
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = true
@@ -346,10 +356,23 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 //
 // handle append entries rpc
 //
-
 func (rf *Raft) OnAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	LogPrint(dVote, "S%v  on term %v recive AppendEntries From Leader S%v on term %v", rf.me, rf.currentTerm, args.Leader, args.Term)
+	if rf.currentTerm > args.Term {
+		reply.Term = rf.currentTerm
+		reply.Success = false
+		return
+	}
+	if rf.state == Leader && rf.currentTerm < args.Term {
+		LogPrint(dVote, "$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$  %v", rf.me)
+		rf.state = Follower
+		rf.currentTerm = args.Term
+		reply.Term = args.Term
+		reply.Success = true
+		return
+	}
 
 	rf.currentTerm = args.Term
 	reply.Term = args.Term
@@ -357,6 +380,11 @@ func (rf *Raft) OnAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesRep
 
 	rf.lastReciveTime = time.Now()
 	rf.alreadRecivedRpc = true
+
+	//clear last vote
+	rf.votedFor = -1
+	// rf.voteTerm = 0
+
 }
 
 //
@@ -449,12 +477,18 @@ func (rf *Raft) followerTick() {
 	rf.mu.Lock()
 	// defer rf.mu.Unlock()
 	if !rf.alreadRecivedRpc {
-		LogPrint(dInfo, "Try start Election By S%v", rf.me)
 		rf.currentTerm++
+		if rf.voteTerm == rf.currentTerm {
+			LogPrint(dVote, "S%v already vote. Wait for result", rf.me)
+			rf.mu.Unlock()
+			return
+		}
 		rf.votedFor = rf.me
+		rf.voteTerm = rf.currentTerm
 		rf.voteCount = 1
 		rf.state = Candidate
-
+		rf.replyCount = 0
+		LogPrint(dInfo, "Try start Election By S%v on term %v", rf.me, rf.currentTerm)
 		argsList := make([]RequestVoteArgs, len(rf.peers))
 		replyList := make([]RequestVoteReply, len(rf.peers))
 		for i, _ := range rf.peers {
@@ -466,11 +500,11 @@ func (rf *Raft) followerTick() {
 
 		go rf.RequestOthersVoteMe(argsList, replyList)
 		rf.mu.Unlock()
-		return
 	} else {
 		now := time.Now()
 		if now.Sub(rf.lastReciveTime) > time.Duration(HeartBeatTimeOut*int(time.Millisecond)) {
 			rf.alreadRecivedRpc = false
+			LogPrint(dVote, "S%v failed connect to Leader.", rf.me)
 		}
 		rf.mu.Unlock()
 	}
@@ -479,7 +513,9 @@ func (rf *Raft) followerTick() {
 
 func (rf *Raft) leaderTick() {
 	time.Sleep(time.Duration(HearBeatTick * int(time.Millisecond)))
-	rf.SendAllAppendEntries()
+	// rf.mu.Lock()
+	go rf.SendAllAppendEntries()
+	// rf.mu.Unlock()
 }
 
 // The ticker go routine starts a new election if this peer hasn't received
@@ -531,6 +567,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = Follower
 	rf.alreadRecivedRpc = false
 	rf.voteCount = 0
+	rf.replyCount = 0
+	rf.voteTerm = 0
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
