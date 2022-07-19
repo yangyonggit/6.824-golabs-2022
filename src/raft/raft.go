@@ -584,10 +584,13 @@ func (rf *Raft) candidateTick() {
 		}
 		rf.mu.Unlock()
 		rf.RequestOthersVoteMe(argsList, replyList)
+		waitTime = rand.Intn(ElectionMaxWait-ElectionMinWait) + ElectionMinWait*2
+		time.Sleep(time.Duration(waitTime * int(time.Millisecond)))
 		return
 	}
 
 	rf.mu.Unlock()
+
 }
 
 func (rf *Raft) leaderTick() {
