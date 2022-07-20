@@ -112,13 +112,6 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 
-//
-// LogEntry
-//
-type AppendEntry struct {
-	// log string
-}
-
 type ServerState int
 
 const (
@@ -151,7 +144,7 @@ type Raft struct {
 	//Persisten state on all servers
 	currentTerm int
 	votedFor    int // candidateId that recevived vote in current term (or null if none)
-	logList     []AppendEntry
+	log         []interface{}
 
 	//Volatile state on all servers
 	commitIndex int
@@ -317,13 +310,27 @@ func (rf *Raft) requestVoteToIndex(i int, args RequestVoteArgs, reply RequestVot
 
 	if validCount < 3 && rf.voteCount == validCount {
 		LogPrint(dVote, "S%v became a leader!!!!!!!!  validCount=%v voteCount=%v", rf.me, validCount, rf.voteCount)
-		rf.state = Leader
+		rf.doLeaderInit()
 	} else if rf.voteCount > validCount/2 {
 		LogPrint(dVote, "S%v became a leader!!!!!!!!  validCount=%v voteCount=%v", rf.me, validCount, rf.voteCount)
-		rf.state = Leader
+		rf.doLeaderInit()
 	}
+
 	rf.mu.Unlock()
 	rf.SendAllAppendEntries()
+}
+
+func (rf *Raft) doLeaderInit() {
+	LogPrint(dLeader, "S%v is Leader. Do init......", rf.me)
+	rf.state = Leader
+	rf.nextIndex = make([]int, len(rf.peers))
+	rf.matchIndex = make([]int, len(rf.peers))
+
+	for i := range rf.peers {
+		rf.nextIndex[i] = len(rf.log)
+		rf.matchIndex[i] = 0
+	}
+
 }
 
 //RequestOthersVoteMe
@@ -517,7 +524,17 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	index = rf.lastApplied
+	term = rf.currentTerm
+	isLeader = rf.state == Leader
+	if isLeader {
+		rf.log = append(rf.log, command)
+		//todo ....
+	} else {
+		return index, term, isLeader
+	}
 	return index, term, isLeader
 }
 
@@ -657,6 +674,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.voteCount = 0
 	rf.replyCount = 0
 	rf.missCount = 0
+
+	rf.log = make([]interface{}, 0)
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
