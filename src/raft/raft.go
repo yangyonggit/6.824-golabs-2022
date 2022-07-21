@@ -127,6 +127,11 @@ const (
 	HeartBeatTimeOut int = 600
 )
 
+type Entry struct {
+	Cmd  interface{}
+	Term int
+}
+
 //
 // A Go object implementing a single Raft peer.
 //
@@ -144,7 +149,7 @@ type Raft struct {
 	//Persisten state on all servers
 	currentTerm int
 	votedFor    int // candidateId that recevived vote in current term (or null if none)
-	log         []interface{}
+	log         []Entry
 
 	//Volatile state on all servers
 	commitIndex int
@@ -161,6 +166,7 @@ type Raft struct {
 	voteCount        int
 	replyCount       int
 	missCount        int
+	appendReplyCount int
 }
 
 // return currentTerm and whether this server
@@ -260,8 +266,12 @@ type RequestVoteReply struct {
 }
 
 type AppendEntriesArgs struct {
-	Term   int
-	Leader int
+	Term         int
+	Leader       int
+	PreLogIndex  int
+	PrevLogTerm  int
+	Entries      []Entry
+	LeaderCommit int
 }
 
 type AppendEntriesReply struct {
@@ -317,7 +327,7 @@ func (rf *Raft) requestVoteToIndex(i int, args RequestVoteArgs, reply RequestVot
 	}
 
 	rf.mu.Unlock()
-	rf.SendAllAppendEntries()
+	rf.SendAllAppendEntries(true)
 }
 
 func (rf *Raft) doLeaderInit() {
@@ -328,7 +338,7 @@ func (rf *Raft) doLeaderInit() {
 
 	for i := range rf.peers {
 		rf.nextIndex[i] = len(rf.log)
-		rf.matchIndex[i] = 0
+		rf.matchIndex[i] = -1
 	}
 
 }
@@ -344,30 +354,41 @@ func (rf *Raft) RequestOthersVoteMe(argsList []RequestVoteArgs, replyList []Requ
 }
 
 //Leader send Heart Beat to all
-func (rf *Raft) SendAllAppendEntries() {
+func (rf *Raft) SendAllAppendEntries(empty bool) {
 	for i := range rf.peers {
 		if i != rf.me {
-			go rf.sendAppendEntriesToIndex(i)
+			go rf.sendAppendEntriesToIndex(i, empty)
 		}
 	}
 }
 
-func (rf *Raft) sendAppendEntriesToIndex(i int) {
-	rf.mu.Lock()
-	if rf.state != Leader {
-		rf.mu.Unlock()
-		return
-	}
-
+func (rf *Raft) buildAppendEntriesArgs(i int, empty bool) *AppendEntriesArgs {
 	args := AppendEntriesArgs{}
-	reply := AppendEntriesReply{}
-
 	args.Leader = rf.me
 	args.Term = rf.currentTerm
+	if !empty {
+		logRepicationCount := len(rf.log) - rf.nextIndex[i]
+		if logRepicationCount > 0 {
+			args.Entries = make([]Entry, logRepicationCount)
+			copy(args.Entries, rf.log[rf.nextIndex[i]:])
+			args.PreLogIndex = rf.matchIndex[i]
+			if args.PreLogIndex >= 0 {
+				args.PrevLogTerm = rf.log[args.PreLogIndex].Term
+			} else {
+				args.PrevLogTerm = -1
+			}
+			args.LeaderCommit = rf.commitIndex
+		} else {
+			args.Entries = nil
+			args.PreLogIndex = -1
+			args.PrevLogTerm = -1
+			args.LeaderCommit = rf.commitIndex
+		}
+	}
+	return &args
+}
 
-	rf.mu.Unlock()
-	ok := rf.sendAppendEntries(i, &args, &reply)
-
+func (rf *Raft) checkAppendEntriesReply(i int, empty bool, ok bool, args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	if rf.state != Leader {
 		rf.mu.Unlock()
@@ -390,7 +411,28 @@ func (rf *Raft) sendAppendEntriesToIndex(i int) {
 		rf.mu.Unlock()
 		return
 	}
+
+	if reply.Success {
+		rf.nextIndex[i] += len(args.Entries)
+		rf.matchIndex[i] += len(args.Entries)
+	}
+
 	rf.mu.Unlock()
+}
+
+func (rf *Raft) sendAppendEntriesToIndex(i int, empty bool) {
+	rf.mu.Lock()
+	if rf.state != Leader {
+		rf.mu.Unlock()
+		return
+	}
+
+	args := rf.buildAppendEntriesArgs(i, empty)
+	reply := AppendEntriesReply{}
+
+	rf.mu.Unlock()
+	ok := rf.sendAppendEntries(i, args, &reply)
+	rf.checkAppendEntriesReply(i, empty, ok, args, &reply)
 }
 
 //
@@ -440,29 +482,70 @@ func (rf *Raft) OnAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesRep
 	rf.lastReciveTime = time.Now()
 	rf.alreadRecivedRpc = true
 
+	//common check
 	if args.Term > rf.currentTerm {
 		if rf.state != Follower {
-			LogPrint(dVote, "S%v on term %v. Change To term %v", rf.me, rf.currentTerm, args.Term)
+			LogPrint(dInfo, "S%v on term %v. Change To term %v", rf.me, rf.currentTerm, args.Term)
 			rf.state = Follower
 		}
 		rf.currentTerm = args.Term
 	}
 
 	if args.Term == rf.currentTerm && rf.state == Leader {
-		LogPrint(dVote, "S2S, kill one. S%v on term %v. Change To term %v", rf.me, rf.currentTerm, args.Term)
+		LogPrint(dInfo, "S2S, kill one. S%v on term %v. Change To term %v", rf.me, rf.currentTerm, args.Term)
 		rf.state = Follower
 		rf.currentTerm = args.Term
 	}
 
+	//task 1.Reply false if term < currentTerm
 	if args.Term < rf.currentTerm {
+		LogPrint(dInfo, "S%v on term %v recive Leader on term %v --- S% AppendEntries , leader term is behind -- failed check 1 ", rf.me, rf.currentTerm, args.Leader, args.Term)
 		reply.Term = rf.currentTerm
 		reply.Success = false
-
-	} else {
-		rf.currentTerm = args.Term
-		reply.Term = args.Term
-		reply.Success = true
+		return
 	}
+
+	//task 2 Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm
+	if args.PreLogIndex >= 0 && args.PrevLogTerm >= 0 &&
+		(args.PreLogIndex >= len(rf.log) || (args.PreLogIndex < len(rf.log) && rf.log[args.PreLogIndex].Term != args.PrevLogTerm)) {
+		LogPrint(dInfo, "S%v on term %v recive Leader on term %v --- S% AppendEntries , preLog not exist  -- failed check 2 ", rf.me, rf.currentTerm, args.Leader, args.Term)
+		reply.Term = rf.currentTerm
+		reply.Success = false
+		return
+	}
+
+	//task 3:If an existing entry conflicts with a new one (same index
+	//but different terms), delete the existing entry and all that
+	//follow it (§5.3
+	//task 5:Append any new entries not already in the log
+	preIndex := 0
+	if args.PreLogIndex > 0 {
+		preIndex = args.PreLogIndex
+	}
+	if args.Entries != nil && len(args.Entries) > 0 {
+		for i, entry := range args.Entries {
+			index := i + preIndex
+			if index >= len(rf.log) {
+				rf.log = append(rf.log, entry)
+			} else {
+				rf.log[index] = entry
+			}
+		}
+	}
+
+	//task 5,If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
+	if args.LeaderCommit > rf.commitIndex {
+		if args.LeaderCommit < len(rf.log)-1 {
+			rf.commitIndex = args.PreLogIndex
+		} else {
+			rf.commitIndex = len(rf.log) - 1
+		}
+		// rf.commitIndex = math.Min(args.LeaderCommit, len(rf.log)-1)
+	}
+
+	rf.currentTerm = args.Term
+	reply.Term = args.Term
+	reply.Success = true
 }
 
 //
@@ -526,12 +609,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	index = rf.lastApplied
 	term = rf.currentTerm
 	isLeader = rf.state == Leader
 	if isLeader {
-		rf.log = append(rf.log, command)
-		//todo ....
+		entry := Entry{Cmd: command, Term: rf.currentTerm}
+		rf.log = append(rf.log, entry)
+		index = len(rf.log) - 1
 	} else {
 		return index, term, isLeader
 	}
@@ -557,6 +640,10 @@ func (rf *Raft) Kill() {
 func (rf *Raft) killed() bool {
 	z := atomic.LoadInt32(&rf.dead)
 	return z == 1
+}
+
+func (rf *Raft) appliyTick() {
+
 }
 
 func (rf *Raft) followerTick() {
@@ -617,7 +704,7 @@ func (rf *Raft) leaderTick() {
 	// 	return
 	// }
 	// rf.mu.Unlock()
-	rf.SendAllAppendEntries()
+	rf.SendAllAppendEntries(false)
 
 }
 
@@ -675,7 +762,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.replyCount = 0
 	rf.missCount = 0
 
-	rf.log = make([]interface{}, 0)
+	rf.log = make([]Entry, 0)
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
