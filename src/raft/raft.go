@@ -149,7 +149,7 @@ type Raft struct {
 	//Persisten state on all servers
 	currentTerm int
 	votedFor    int // candidateId that recevived vote in current term (or null if none)
-	log         []Entry
+	log         map[int]Entry
 
 	//Volatile state on all servers
 	commitIndex int
@@ -339,7 +339,7 @@ func (rf *Raft) doLeaderInit() {
 	for i := range rf.peers {
 		rf.nextIndex[i] = len(rf.log)
 		LogPrint(dTest, "S%v    init next index %v   ----   %v", rf.me, i, rf.nextIndex[i])
-		rf.matchIndex[i] = -1
+		rf.matchIndex[i] = 0
 	}
 
 }
@@ -371,20 +371,24 @@ func (rf *Raft) buildAppendEntriesArgs(i int, empty bool) *AppendEntriesArgs {
 		logRepicationCount := len(rf.log) - rf.nextIndex[i]
 		LogPrint(dTest, "logRepicationCount %v      len->%v    next->%v", logRepicationCount, len(rf.log), rf.nextIndex[i])
 		if logRepicationCount > 0 {
-			args.Entries = make([]Entry, logRepicationCount)
-			copy(args.Entries, rf.log[rf.nextIndex[i]:])
-			LogPrint(dTest, "S%v build append to %v,  rf.NextIndex->%v len of log->%v  send->%v", rf.me, i, rf.nextIndex[i], len(rf.log), len(args.Entries))
+			args.Entries = make([]Entry, 0)
+			for i := rf.nextIndex[i] + 1; i <= len(rf.log); i++ {
+				args.Entries = append(args.Entries, rf.log[i])
+			}
+
+			// copy(args.Entries, rf.log[rf.nextIndex[i]:])
+			LogPrint(dTest, "S%v build append to S%v,  rf.NextIndex->%v len of log->%v  send->%v", rf.me, i, rf.nextIndex[i], len(rf.log), len(args.Entries))
 			args.PreLogIndex = rf.matchIndex[i]
-			if args.PreLogIndex >= 0 {
+			if args.PreLogIndex > 0 {
 				args.PrevLogTerm = rf.log[args.PreLogIndex].Term
 			} else {
-				args.PrevLogTerm = -1
+				args.PrevLogTerm = 0
 			}
 			args.LeaderCommit = rf.commitIndex
 		} else {
 			args.Entries = nil
-			args.PreLogIndex = -1
-			args.PrevLogTerm = -1
+			args.PreLogIndex = 0
+			args.PrevLogTerm = 0
 			args.LeaderCommit = rf.commitIndex
 		}
 	}
@@ -429,20 +433,21 @@ func (rf *Raft) checkAppendEntriesReply(i int, empty bool, ok bool, args *Append
 		LogPrint(dTest, "S%v  --   %v     %v", rf.me, i, rf.nextIndex[i])
 	}
 
-	maxMatchIndex := -1
+	maxMatchIndex := 0
 	for _, v := range rf.matchIndex {
 		if maxMatchIndex < v {
 			maxMatchIndex = v
 		}
 	}
 
-	for maxMatchIndex >= 0 {
+	for maxMatchIndex > rf.commitIndex {
 		count := 0
 		for _, v := range rf.matchIndex {
 			if v >= maxMatchIndex {
 				count++
 			}
 		}
+
 		if count > len(rf.matchIndex)/2 && rf.log[maxMatchIndex].Term == rf.currentTerm {
 			// rf.commitIndex = maxMatchIndex
 			rf.commitLog(maxMatchIndex)
@@ -546,8 +551,8 @@ func (rf *Raft) OnAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesRep
 	// }
 
 	//task 2 Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm
-	if args.PreLogIndex >= 0 && args.PrevLogTerm >= 0 &&
-		(args.PreLogIndex >= len(rf.log) || (args.PreLogIndex < len(rf.log) && rf.log[args.PreLogIndex].Term != args.PrevLogTerm)) {
+	if args.PreLogIndex > 0 && args.PrevLogTerm > 0 &&
+		(args.PreLogIndex >= len(rf.log)+1 || (args.PreLogIndex <= len(rf.log) && rf.log[args.PreLogIndex].Term != args.PrevLogTerm)) {
 		LogPrint(dInfo, "S%v on term %v recive Leader on term %v --- S% AppendEntries , preLog not exist  -- failed check 2 ", rf.me, rf.currentTerm, args.Leader, args.Term)
 		reply.Term = rf.currentTerm
 		reply.Success = false
@@ -565,11 +570,7 @@ func (rf *Raft) OnAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesRep
 	if args.Entries != nil && len(args.Entries) > 0 {
 		for i, entry := range args.Entries {
 			index := i + preIndex
-			if index >= len(rf.log) {
-				rf.log = append(rf.log, entry)
-			} else {
-				rf.log[index] = entry
-			}
+			rf.log[index] = entry
 		}
 	}
 
@@ -578,10 +579,10 @@ func (rf *Raft) OnAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesRep
 	LogPrint(dTest, "S%v  ===>  args.LeaderCommit -> %v      rf.commitIndex -> %v", rf.me, args.LeaderCommit, rf.commitIndex)
 	if args.LeaderCommit > rf.commitIndex {
 		minValue := 0
-		if args.LeaderCommit < len(rf.log)-1 {
-			minValue = args.PreLogIndex
+		if args.LeaderCommit < len(rf.log) {
+			minValue = args.LeaderCommit
 		} else {
-			minValue = len(rf.log) - 1
+			minValue = len(rf.log)
 		}
 		rf.commitLog(minValue)
 		LogPrint(dLeader, "S%v Commit index up to %v --- by update to leader", rf.me, rf.commitIndex)
@@ -658,8 +659,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader = rf.state == Leader
 	if isLeader {
 		entry := Entry{Cmd: command, Term: rf.currentTerm}
-		rf.log = append(rf.log, entry)
-		index = len(rf.log) - 1
+		// rf.log = append(rf.log, entry)
+		lastIndex := len(rf.log)
+		lastIndex++
+		rf.log[lastIndex] = entry
+		index = lastIndex
 	} else {
 		return index, term, isLeader
 	}
@@ -819,15 +823,15 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.dead = 0
 	rf.currentTerm = 0
 	rf.votedFor = -1
-	rf.commitIndex = -1
-	rf.lastApplied = -1
+	rf.commitIndex = 0
+	rf.lastApplied = 0
 	rf.state = Follower
 	rf.alreadRecivedRpc = false
 	rf.voteCount = 0
 	rf.replyCount = 0
 	rf.missCount = 0
 
-	rf.log = make([]Entry, 0)
+	rf.log = map[int]Entry{}
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
