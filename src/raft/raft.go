@@ -141,7 +141,7 @@ type Raft struct {
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
-
+	applyCh   chan ApplyMsg
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
@@ -338,6 +338,7 @@ func (rf *Raft) doLeaderInit() {
 
 	for i := range rf.peers {
 		rf.nextIndex[i] = len(rf.log)
+		LogPrint(dTest, "S%v    init next index %v   ----   %v", rf.me, i, rf.nextIndex[i])
 		rf.matchIndex[i] = -1
 	}
 
@@ -368,9 +369,11 @@ func (rf *Raft) buildAppendEntriesArgs(i int, empty bool) *AppendEntriesArgs {
 	args.Term = rf.currentTerm
 	if !empty {
 		logRepicationCount := len(rf.log) - rf.nextIndex[i]
+		LogPrint(dTest, "logRepicationCount %v      len->%v    next->%v", logRepicationCount, len(rf.log), rf.nextIndex[i])
 		if logRepicationCount > 0 {
 			args.Entries = make([]Entry, logRepicationCount)
 			copy(args.Entries, rf.log[rf.nextIndex[i]:])
+			LogPrint(dTest, "S%v build append to %v,  rf.NextIndex->%v len of log->%v  send->%v", rf.me, i, rf.nextIndex[i], len(rf.log), len(args.Entries))
 			args.PreLogIndex = rf.matchIndex[i]
 			if args.PreLogIndex >= 0 {
 				args.PrevLogTerm = rf.log[args.PreLogIndex].Term
@@ -413,8 +416,39 @@ func (rf *Raft) checkAppendEntriesReply(i int, empty bool, ok bool, args *Append
 	}
 
 	if reply.Success {
-		rf.nextIndex[i] += len(args.Entries)
-		rf.matchIndex[i] += len(args.Entries)
+		if args.Entries != nil && len(args.Entries) > 0 {
+			rf.nextIndex[i] += len(args.Entries)
+			rf.matchIndex[i] += len(args.Entries)
+			LogPrint(dLeader, "S%v  --   %v     next->%v match->%v len->%v", rf.me, i, rf.nextIndex[i], rf.matchIndex[i], len(rf.log))
+		}
+	} else {
+		//todo
+		if rf.nextIndex[i] > 0 {
+			rf.nextIndex[i]--
+		}
+		LogPrint(dTest, "S%v  --   %v     %v", rf.me, i, rf.nextIndex[i])
+	}
+
+	maxMatchIndex := -1
+	for _, v := range rf.matchIndex {
+		if maxMatchIndex < v {
+			maxMatchIndex = v
+		}
+	}
+
+	for maxMatchIndex >= 0 {
+		count := 0
+		for _, v := range rf.matchIndex {
+			if v >= maxMatchIndex {
+				count++
+			}
+		}
+		if count > len(rf.matchIndex)/2 && rf.log[maxMatchIndex].Term == rf.currentTerm {
+			// rf.commitIndex = maxMatchIndex
+			rf.commitLog(maxMatchIndex)
+			LogPrint(dLeader, "S%v Commit index up to %v", rf.me, rf.commitIndex)
+		}
+		maxMatchIndex--
 	}
 
 	rf.mu.Unlock()
@@ -505,6 +539,12 @@ func (rf *Raft) OnAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesRep
 		return
 	}
 
+	// if args.Entries == nil || len(args.Entries) == 0 {
+	// 	reply.Term = rf.currentTerm
+	// 	reply.Success = true
+	// 	return
+	// }
+
 	//task 2 Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm
 	if args.PreLogIndex >= 0 && args.PrevLogTerm >= 0 &&
 		(args.PreLogIndex >= len(rf.log) || (args.PreLogIndex < len(rf.log) && rf.log[args.PreLogIndex].Term != args.PrevLogTerm)) {
@@ -534,12 +574,17 @@ func (rf *Raft) OnAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesRep
 	}
 
 	//task 5,If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
+
+	LogPrint(dTest, "S%v  ===>  args.LeaderCommit -> %v      rf.commitIndex -> %v", rf.me, args.LeaderCommit, rf.commitIndex)
 	if args.LeaderCommit > rf.commitIndex {
+		minValue := 0
 		if args.LeaderCommit < len(rf.log)-1 {
-			rf.commitIndex = args.PreLogIndex
+			minValue = args.PreLogIndex
 		} else {
-			rf.commitIndex = len(rf.log) - 1
+			minValue = len(rf.log) - 1
 		}
+		rf.commitLog(minValue)
+		LogPrint(dLeader, "S%v Commit index up to %v --- by update to leader", rf.me, rf.commitIndex)
 		// rf.commitIndex = math.Min(args.LeaderCommit, len(rf.log)-1)
 	}
 
@@ -642,8 +687,28 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-func (rf *Raft) appliyTick() {
+func (rf *Raft) commitTick() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
+	if rf.commitIndex > rf.lastApplied {
+		rf.lastApplied++
+		// todo aplply log[lastApplied] to state machine
+
+	}
+}
+
+func (rf *Raft) commitLog(index int) {
+	for i := rf.commitIndex + 1; i <= index; i++ {
+		msg := ApplyMsg{}
+		msg.CommandValid = true
+		msg.Command = rf.log[i].Cmd
+		msg.CommandIndex = i
+		LogPrint(dCommit, "commitLog  S%v   ------ commit id -> %v", rf.me, i)
+		rf.applyCh <- msg
+	}
+
+	rf.commitIndex = index
 }
 
 func (rf *Raft) followerTick() {
@@ -720,7 +785,7 @@ func (rf *Raft) ticker() {
 		rf.mu.Lock()
 		state := rf.state
 		rf.mu.Unlock()
-
+		rf.commitTick()
 		if state == Follower {
 			rf.followerTick()
 		} else if state == Candidate {
@@ -750,7 +815,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
-
+	rf.applyCh = applyCh
 	rf.dead = 0
 	rf.currentTerm = 0
 	rf.votedFor = -1
