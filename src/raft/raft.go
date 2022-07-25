@@ -499,6 +499,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.votedFor = -1
 	}
 
+	//If votedFor is null or candidateId, and candidate’s log is at
+	//least as up-to-date as receiver’s log, grant vot
 	if rf.votedFor == -1 {
 		LogPrint(dVote, "S%v  vote for S%v", rf.me, args.CandidateId)
 		rf.votedFor = args.CandidateId
@@ -552,7 +554,7 @@ func (rf *Raft) OnAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesRep
 
 	//task 2 Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm
 	if args.PreLogIndex > 0 && args.PrevLogTerm > 0 &&
-		(args.PreLogIndex >= len(rf.log)+1 || (args.PreLogIndex <= len(rf.log) && rf.log[args.PreLogIndex].Term != args.PrevLogTerm)) {
+		(args.PreLogIndex > len(rf.log) || (args.PreLogIndex <= len(rf.log) && rf.log[args.PreLogIndex].Term != args.PrevLogTerm)) {
 		LogPrint(dInfo, "S%v on term %v recive Leader on term %v --- S% AppendEntries , preLog not exist  -- failed check 2 ", rf.me, rf.currentTerm, args.Leader, args.Term)
 		reply.Term = rf.currentTerm
 		reply.Success = false
@@ -563,14 +565,11 @@ func (rf *Raft) OnAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesRep
 	//but different terms), delete the existing entry and all that
 	//follow it (§5.3
 	//task 5:Append any new entries not already in the log
-	preIndex := 0
-	if args.PreLogIndex > 0 {
-		preIndex = args.PreLogIndex
-	}
 	if args.Entries != nil && len(args.Entries) > 0 {
 		for i, entry := range args.Entries {
-			index := i + preIndex
+			index := i + args.PreLogIndex + 1
 			rf.log[index] = entry
+			LogPrint(dCommit, "S%v commit log %v ->>>>>>>>>>>>>>>>>>>>>> update by leader", rf.me, index)
 		}
 	}
 
@@ -663,6 +662,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		lastIndex := len(rf.log)
 		lastIndex++
 		rf.log[lastIndex] = entry
+		LogPrint(dCommit, "S%v  rf log write to %v", rf.me, lastIndex)
 		index = lastIndex
 	} else {
 		return index, term, isLeader
