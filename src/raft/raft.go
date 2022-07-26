@@ -339,7 +339,7 @@ func (rf *Raft) doLeaderInit() {
 	for i := range rf.peers {
 		rf.nextIndex[i] = len(rf.log)
 		// LogPrint(dTest, "S%v    init next index %v   ----   %v", rf.me, i, rf.nextIndex[i])
-		rf.matchIndex[i] = 0
+		rf.matchIndex[i] = rf.commitIndex
 	}
 
 }
@@ -439,7 +439,7 @@ func (rf *Raft) checkAppendEntriesReply(i int, empty bool, ok bool, args *Append
 			maxMatchIndex = v
 		}
 	}
-	// LogPrint(dTest, "Leader S%v found maxMatchIndex = %v", rf.me, maxMatchIndex)
+	// LogPrint(dTest, "Leader S%v found maxMatchIndex = %v  and commitIndex = %v", rf.me, maxMatchIndex, rf.commitIndex)
 	for maxMatchIndex > rf.commitIndex {
 		count := 0
 		for _, v := range rf.matchIndex {
@@ -475,6 +475,14 @@ func (rf *Raft) sendAppendEntriesToIndex(i int, empty bool) {
 	rf.checkAppendEntriesReply(i, empty, ok, args, &reply)
 }
 
+func (rf *Raft) getLastLogTerm() int {
+	if len(rf.log) == 0 {
+		return 0
+	} else {
+		return rf.log[len(rf.log)].Term
+	}
+}
+
 //
 // example RequestVote RPC handler.
 //
@@ -503,10 +511,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//If votedFor is null or candidateId, and candidate’s log is at
 	//least as up-to-date as receiver’s log, grant vot
 	canVote := false
+	LogPrint(dTest, "LastLogIndex = %v    lastTerm = %v   curTerm = %v  len(log) =%v logTerm = %v",
+		args.LastLogIndex, args.LastLogTerm, rf.currentTerm, len(rf.log), rf.getLastLogTerm())
 	if rf.votedFor == -1 {
 		if args.LastLogIndex == 0 && len(rf.log) == 0 {
 			canVote = true
-		} else if args.LastLogIndex >= len(rf.log) {
+		} else if (args.LastLogTerm > rf.getLastLogTerm()) ||
+			(args.LastLogTerm == rf.getLastLogTerm() && args.LastLogIndex >= len(rf.log)) {
 			canVote = true
 		}
 	}
@@ -682,7 +693,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		lastIndex++
 		rf.log[lastIndex] = entry
 		LogPrint(dCommit, "=========================================================================== %v", command)
-		LogPrint(dCommit, "S%v Leader add rf log write to index %v", rf.me, lastIndex)
+		LogPrint(dCommit, "S%v Leader add rf log write to index %v  on Term ------>%v", rf.me, lastIndex, rf.currentTerm)
 		index = lastIndex
 	} else {
 		return index, term, isLeader
