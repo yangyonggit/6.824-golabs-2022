@@ -181,7 +181,7 @@ func (rf *Raft) GetState() (int, bool) {
 	term = rf.currentTerm
 	isleader = rf.state == Leader
 
-	LogPrint(dInfo, "S%d isLeader %v  ----- %v", rf.me, rf.state, term)
+	LogPrint(dInfo, "S%d isLeader %v on Term %v  ----- log=%v   commitIndex=%v", rf.me, rf.state, term, len(rf.log), rf.commitIndex)
 	return term, isleader
 }
 
@@ -338,7 +338,7 @@ func (rf *Raft) doLeaderInit() {
 
 	for i := range rf.peers {
 		rf.nextIndex[i] = len(rf.log)
-		LogPrint(dTest, "S%v    init next index %v   ----   %v", rf.me, i, rf.nextIndex[i])
+		// LogPrint(dTest, "S%v    init next index %v   ----   %v", rf.me, i, rf.nextIndex[i])
 		rf.matchIndex[i] = 0
 	}
 
@@ -369,7 +369,7 @@ func (rf *Raft) buildAppendEntriesArgs(i int, empty bool) *AppendEntriesArgs {
 	args.Term = rf.currentTerm
 	if !empty {
 		logRepicationCount := len(rf.log) - rf.nextIndex[i]
-		LogPrint(dTest, "logRepicationCount %v      len->%v    next->%v", logRepicationCount, len(rf.log), rf.nextIndex[i])
+		// LogPrint(dTest, "logRepicationCount %v      len->%v    next->%v", logRepicationCount, len(rf.log), rf.nextIndex[i])
 		if logRepicationCount > 0 {
 			args.Entries = make([]Entry, 0)
 			for i := rf.nextIndex[i] + 1; i <= len(rf.log); i++ {
@@ -378,7 +378,7 @@ func (rf *Raft) buildAppendEntriesArgs(i int, empty bool) *AppendEntriesArgs {
 
 			// copy(args.Entries, rf.log[rf.nextIndex[i]:])
 			LogPrint(dTest, "S%v build append to S%v,  rf.NextIndex->%v len of log->%v  send->%v", rf.me, i, rf.nextIndex[i], len(rf.log), len(args.Entries))
-			args.PreLogIndex = rf.matchIndex[i]
+			args.PreLogIndex = rf.nextIndex[i]
 			if args.PreLogIndex > 0 {
 				args.PrevLogTerm = rf.log[args.PreLogIndex].Term
 			} else {
@@ -423,14 +423,14 @@ func (rf *Raft) checkAppendEntriesReply(i int, empty bool, ok bool, args *Append
 		if args.Entries != nil && len(args.Entries) > 0 {
 			rf.nextIndex[i] += len(args.Entries)
 			rf.matchIndex[i] += len(args.Entries)
-			LogPrint(dLeader, "S%v  --   %v     next->%v match->%v len->%v", rf.me, i, rf.nextIndex[i], rf.matchIndex[i], len(rf.log))
+			LogPrint(dLeader, "Leader up date index ====== S%v  <--  S%v     next->%v match->%v len->%v", rf.me, i, rf.nextIndex[i], rf.matchIndex[i], len(rf.log))
 		}
 	} else {
 		//todo
 		if rf.nextIndex[i] > 0 {
 			rf.nextIndex[i]--
 		}
-		LogPrint(dTest, "S%v  --   %v     %v", rf.me, i, rf.nextIndex[i])
+		// LogPrint(dTest, "S%v  --   %v     %v", rf.me, i, rf.nextIndex[i])
 	}
 
 	maxMatchIndex := 0
@@ -439,7 +439,7 @@ func (rf *Raft) checkAppendEntriesReply(i int, empty bool, ok bool, args *Append
 			maxMatchIndex = v
 		}
 	}
-
+	// LogPrint(dTest, "Leader S%v found maxMatchIndex = %v", rf.me, maxMatchIndex)
 	for maxMatchIndex > rf.commitIndex {
 		count := 0
 		for _, v := range rf.matchIndex {
@@ -447,11 +447,12 @@ func (rf *Raft) checkAppendEntriesReply(i int, empty bool, ok bool, args *Append
 				count++
 			}
 		}
-
-		if count > len(rf.matchIndex)/2 && rf.log[maxMatchIndex].Term == rf.currentTerm {
+		// LogPrint(dTest, "Leader S%v how many follower update to maxMatchIndex %v", rf.me, count)
+		if count+1 > len(rf.peers)/2 && rf.log[maxMatchIndex].Term == rf.currentTerm {
 			// rf.commitIndex = maxMatchIndex
 			rf.commitLog(maxMatchIndex)
-			LogPrint(dLeader, "S%v Commit index up to %v", rf.me, rf.commitIndex)
+			LogPrint(dLeader, "========> S%v Commit index up to %v", rf.me, rf.commitIndex)
+			LogPrint(dLeader, "-----------------------------------------------------------------------")
 		}
 		maxMatchIndex--
 	}
@@ -501,7 +502,16 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	//If votedFor is null or candidateId, and candidate’s log is at
 	//least as up-to-date as receiver’s log, grant vot
+	canVote := false
 	if rf.votedFor == -1 {
+		if args.LastLogIndex == 0 && len(rf.log) == 0 {
+			canVote = true
+		} else if args.LastLogIndex >= len(rf.log) {
+			canVote = true
+		}
+	}
+
+	if canVote {
 		LogPrint(dVote, "S%v  vote for S%v", rf.me, args.CandidateId)
 		rf.votedFor = args.CandidateId
 		reply.Term = rf.currentTerm
@@ -538,9 +548,17 @@ func (rf *Raft) OnAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesRep
 		rf.currentTerm = args.Term
 	}
 
+	if rf.state == Candidate {
+		rf.state = Follower
+		rf.currentTerm = args.Term
+		reply.Term = rf.currentTerm
+		reply.Success = false
+		return
+	}
+
 	//task 1.Reply false if term < currentTerm
 	if args.Term < rf.currentTerm {
-		LogPrint(dInfo, "S%v on term %v recive Leader on term %v --- S% AppendEntries , leader term is behind -- failed check 1 ", rf.me, rf.currentTerm, args.Leader, args.Term)
+		LogPrint(dInfo, "S%v on term %v recive Leader on term %v --- S%v AppendEntries , leader term is behind -- failed check 1 ", rf.me, rf.currentTerm, args.Leader, args.Term)
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
@@ -555,7 +573,8 @@ func (rf *Raft) OnAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesRep
 	//task 2 Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm
 	if args.PreLogIndex > 0 && args.PrevLogTerm > 0 &&
 		(args.PreLogIndex > len(rf.log) || (args.PreLogIndex <= len(rf.log) && rf.log[args.PreLogIndex].Term != args.PrevLogTerm)) {
-		LogPrint(dInfo, "S%v on term %v recive Leader on term %v --- S% AppendEntries , preLog not exist  -- failed check 2 ", rf.me, rf.currentTerm, args.Leader, args.Term)
+		LogPrint(dInfo, "S%v on term %v.PreLogIndex=>%v, PrevLogTerm=>%v,len(rf.log)=>%v,  preLog not exist  -- failed check 2 ",
+			rf.me, rf.currentTerm, args.PreLogIndex, args.PrevLogTerm, len(rf.log))
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
@@ -569,13 +588,13 @@ func (rf *Raft) OnAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesRep
 		for i, entry := range args.Entries {
 			index := i + args.PreLogIndex + 1
 			rf.log[index] = entry
-			LogPrint(dCommit, "S%v commit log %v ->>>>>>>>>>>>>>>>>>>>>> update by leader", rf.me, index)
+			LogPrint(dCommit, "S%v add log %v ->>>>>>>>>>>>>>>>>>>>>> update by leader", rf.me, index)
 		}
 	}
 
 	//task 5,If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
 
-	LogPrint(dTest, "S%v  ===>  args.LeaderCommit -> %v      rf.commitIndex -> %v", rf.me, args.LeaderCommit, rf.commitIndex)
+	// LogPrint(dTest, "S%v  ===>  args.LeaderCommit -> %v      rf.commitIndex -> %v", rf.me, args.LeaderCommit, rf.commitIndex)
 	if args.LeaderCommit > rf.commitIndex {
 		minValue := 0
 		if args.LeaderCommit < len(rf.log) {
@@ -662,7 +681,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		lastIndex := len(rf.log)
 		lastIndex++
 		rf.log[lastIndex] = entry
-		LogPrint(dCommit, "S%v  rf log write to %v", rf.me, lastIndex)
+		LogPrint(dCommit, "=========================================================================== %v", command)
+		LogPrint(dCommit, "S%v Leader add rf log write to index %v", rf.me, lastIndex)
 		index = lastIndex
 	} else {
 		return index, term, isLeader
@@ -752,8 +772,14 @@ func (rf *Raft) candidateTick() {
 		for i := range rf.peers {
 			argsList[i].Term = rf.currentTerm
 			argsList[i].CandidateId = rf.me
-			argsList[i].LastLogIndex = 0
-			argsList[i].LastLogTerm = 0
+			lastIndex := len(rf.log)
+			argsList[i].LastLogIndex = lastIndex
+			if lastIndex > 0 {
+				argsList[i].LastLogTerm = rf.log[lastIndex].Term
+			} else {
+				argsList[i].LastLogTerm = 0
+			}
+
 		}
 		rf.mu.Unlock()
 		rf.RequestOthersVoteMe(argsList, replyList)
