@@ -318,9 +318,14 @@ func (rf *Raft) requestVoteToIndex(i int, args RequestVoteArgs, reply RequestVot
 
 	LogPrint(dVote, "========== S%v got %v votes from %v    &&&& miss count%v", rf.me, rf.voteCount, rf.replyCount, rf.missCount)
 
+	if rf.voteCount < 2 {
+		rf.mu.Unlock()
+		return
+	}
+
 	validCount := len(rf.peers) - rf.missCount
 
-	if validCount < 3 && rf.voteCount == validCount {
+	if rf.voteCount == len(rf.peers)-1 {
 		LogPrint(dVote, "S%v became a leader!!!!!!!!  validCount=%v voteCount=%v", rf.me, validCount, rf.voteCount)
 		rf.doLeaderInit()
 	} else if rf.voteCount > validCount/2 {
@@ -450,17 +455,27 @@ func (rf *Raft) checkAppendEntriesReply(i int, empty bool, ok bool, args *Append
 				count++
 			}
 		}
-		// LogPrint(dTest, "Leader S%v how many follower update to maxMatchIndex %v", rf.me, count)
-		if maxMatchIndex > 0 && count+1 > len(rf.peers)/2 && maxMatchIndex < len(rf.log) && rf.log[maxMatchIndex].Term == rf.currentTerm {
+		LogPrint(dTest, "Leader S%v how many follower update to maxMatchIndex %v       ---- from  S%v ", rf.me, count, i)
+		if maxMatchIndex > 0 && rf.isLogReplicationOK(count) && maxMatchIndex < len(rf.log) && rf.log[maxMatchIndex].Term == rf.currentTerm {
 			// rf.commitIndex = maxMatchIndex
+			LogPrint(dCommit, "===============================================================================")
 			rf.commitLog(maxMatchIndex)
+			LogPrint(dCommit, "===============================================================================")
 			LogPrint(dLeader, "========> S%v Commit index up to %v", rf.me, rf.commitIndex)
 			LogPrint(dLeader, "-----------------------------------------------------------------------")
+			break
 		}
 		maxMatchIndex--
 	}
 
 	rf.mu.Unlock()
+}
+
+func (rf *Raft) isLogReplicationOK(count int) bool {
+	if len(rf.peers) < 4 {
+		return count > 0
+	}
+	return (count + 1) > len(rf.peers)/2
 }
 
 func (rf *Raft) sendAppendEntriesToIndex(i int, empty bool) {
@@ -545,7 +560,8 @@ func (rf *Raft) lengthOfLog() int {
 
 func (rf *Raft) changeStateToFollow() {
 	rf.state = Follower
-	if rf.commitIndex < len(rf.log)-1 {
+	LogPrint(dTest, "S%v  ------ remove uncommit log commit%v   len%v", rf.me, rf.commitIndex, rf.lengthOfLog())
+	if rf.commitIndex < rf.lengthOfLog()-1 {
 		rf.log = rf.log[:rf.commitIndex+1]
 	}
 }
@@ -563,7 +579,7 @@ func (rf *Raft) OnAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesRep
 	//common check
 	if args.Term > rf.currentTerm {
 		if rf.state != Follower {
-			LogPrint(dInfo, "S%v on term %v. Change To term %v", rf.me, rf.currentTerm, args.Term)
+			LogPrint(dInfo, "S%v on term %v. ======> Change To term %v. Leader is %v", rf.me, rf.currentTerm, args.Term, args.Leader)
 			// rf.state = Follower
 			rf.changeStateToFollow()
 		}
@@ -588,7 +604,8 @@ func (rf *Raft) OnAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesRep
 
 	//task 1.Reply false if term < currentTerm
 	if args.Term < rf.currentTerm {
-		LogPrint(dInfo, "S%v on term %v recive Leader on term %v --- S%v AppendEntries , leader term is behind -- failed check 1 ", rf.me, rf.currentTerm, args.Leader, args.Term)
+		LogPrint(dInfo, "S%v on term %v recive S%v Leader on term %v ---  AppendEntries , leader term is behind -- failed check 1 ",
+			rf.me, rf.currentTerm, args.Leader, args.Term)
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
@@ -622,7 +639,8 @@ func (rf *Raft) OnAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesRep
 			} else {
 				rf.log = append(rf.log, entry)
 			}
-			LogPrint(dCommit, "S%v add log %v ->>>>>>>>>>>>>>>>>>>>>> update by leader   cmd --> %v", rf.me, index, entry.Cmd)
+			LogPrint(dCommit, "S%v add log %v ->>>>>>>>>>>>>>>>>>>>>> update by leader   S%v cmd --> %v ||||  curTerm %v   leaderTerm %v",
+				rf.me, index, args.Leader, entry.Cmd, args.Term, rf.currentTerm)
 		}
 	}
 
@@ -636,7 +654,9 @@ func (rf *Raft) OnAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesRep
 		} else {
 			minValue = rf.lengthOfLog()
 		}
+		LogPrint(dCommit, "----------------------------------------------------------------------")
 		rf.commitLog(minValue)
+		LogPrint(dCommit, "----------------------------------------------------------------------")
 		LogPrint(dLeader, "S%v Commit index up to %v --- by update to leader, rf.lengthOfLog()->%v", rf.me, rf.commitIndex, rf.lengthOfLog())
 		// rf.commitIndex = math.Min(args.LeaderCommit, rf.lengthOfLog()-1)
 	}
@@ -761,7 +781,8 @@ func (rf *Raft) commitLog(index int) {
 		msg.CommandValid = true
 		msg.Command = rf.log[i].Cmd
 		msg.CommandIndex = i
-		LogPrint(dCommit, "commitLog  S%v   ------ commit id -> %v     cmd->%v", rf.me, i, msg.Command)
+		LogPrint(dCommit, "commitLog  S%v   ------ commit id -> %v     cmd->%v   cmdTerm->%v   ||||||||||  curTerm ->%v",
+			rf.me, i, msg.Command, rf.log[i].Term, rf.currentTerm)
 		rf.applyCh <- msg
 	}
 
