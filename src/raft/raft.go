@@ -149,7 +149,8 @@ type Raft struct {
 	//Persisten state on all servers
 	currentTerm int
 	votedFor    int // candidateId that recevived vote in current term (or null if none)
-	log         map[int]Entry
+	// log         map[int]Entry
+	log []Entry
 
 	//Volatile state on all servers
 	commitIndex int
@@ -181,7 +182,7 @@ func (rf *Raft) GetState() (int, bool) {
 	term = rf.currentTerm
 	isleader = rf.state == Leader
 
-	LogPrint(dInfo, "S%d isLeader %v on Term %v  ----- log=%v   commitIndex=%v", rf.me, rf.state, term, len(rf.log), rf.commitIndex)
+	LogPrint(dInfo, "S%d isLeader %v on Term %v  ----- log=%v   commitIndex=%v", rf.me, rf.state, term, rf.lengthOfLog(), rf.commitIndex)
 	return term, isleader
 }
 
@@ -299,7 +300,8 @@ func (rf *Raft) requestVoteToIndex(i int, args RequestVoteArgs, reply RequestVot
 
 		if reply.Term > rf.currentTerm {
 			LogPrint(dVote, "S%v c to f in request. ot = %v  nt = %v", rf.me, rf.currentTerm, reply.Term)
-			rf.state = Follower
+			// rf.state = Follower
+			rf.changeStateToFollow()
 			rf.currentTerm = reply.Term
 			rf.votedFor = -1
 			rf.voteCount = 0
@@ -337,7 +339,7 @@ func (rf *Raft) doLeaderInit() {
 	rf.matchIndex = make([]int, len(rf.peers))
 
 	for i := range rf.peers {
-		rf.nextIndex[i] = len(rf.log)
+		rf.nextIndex[i] = rf.lengthOfLog()
 		// LogPrint(dTest, "S%v    init next index %v   ----   %v", rf.me, i, rf.nextIndex[i])
 		rf.matchIndex[i] = rf.commitIndex
 	}
@@ -368,16 +370,16 @@ func (rf *Raft) buildAppendEntriesArgs(i int, empty bool) *AppendEntriesArgs {
 	args.Leader = rf.me
 	args.Term = rf.currentTerm
 	if !empty {
-		logRepicationCount := len(rf.log) - rf.nextIndex[i]
-		// LogPrint(dTest, "logRepicationCount %v      len->%v    next->%v", logRepicationCount, len(rf.log), rf.nextIndex[i])
+		logRepicationCount := rf.lengthOfLog() - rf.nextIndex[i]
+		// LogPrint(dTest, "logRepicationCount %v      len->%v    next->%v", logRepicationCount, rf.lengthOfLog(), rf.nextIndex[i])
 		if logRepicationCount > 0 {
 			args.Entries = make([]Entry, 0)
-			for i := rf.nextIndex[i] + 1; i <= len(rf.log); i++ {
+			for i := rf.nextIndex[i] + 1; i <= rf.lengthOfLog(); i++ {
 				args.Entries = append(args.Entries, rf.log[i])
 			}
 
 			// copy(args.Entries, rf.log[rf.nextIndex[i]:])
-			LogPrint(dTest, "S%v build append to S%v,  rf.NextIndex->%v len of log->%v  send->%v", rf.me, i, rf.nextIndex[i], len(rf.log), len(args.Entries))
+			LogPrint(dTest, "S%v build append to S%v,  rf.NextIndex->%v len of log->%v  send->%v", rf.me, i, rf.nextIndex[i], rf.lengthOfLog(), len(args.Entries))
 			args.PreLogIndex = rf.nextIndex[i]
 			if args.PreLogIndex > 0 {
 				args.PrevLogTerm = rf.log[args.PreLogIndex].Term
@@ -410,7 +412,8 @@ func (rf *Raft) checkAppendEntriesReply(i int, empty bool, ok bool, args *Append
 
 	if reply.Term > rf.currentTerm {
 		LogPrint(dInfo, "S%v LLL to fff in request. ot = %v  nt = %v", rf.me, rf.currentTerm, reply.Term)
-		rf.state = Follower
+		// rf.state = Follower
+		rf.changeStateToFollow()
 		rf.currentTerm = reply.Term
 		rf.voteCount = 0
 		rf.votedFor = -1
@@ -423,7 +426,7 @@ func (rf *Raft) checkAppendEntriesReply(i int, empty bool, ok bool, args *Append
 		if args.Entries != nil && len(args.Entries) > 0 {
 			rf.nextIndex[i] += len(args.Entries)
 			rf.matchIndex[i] += len(args.Entries)
-			LogPrint(dLeader, "Leader up date index ====== S%v  <--  S%v     next->%v match->%v len->%v", rf.me, i, rf.nextIndex[i], rf.matchIndex[i], len(rf.log))
+			LogPrint(dLeader, "Leader up date index ====== S%v  <--  S%v     next->%v match->%v len->%v", rf.me, i, rf.nextIndex[i], rf.matchIndex[i], rf.lengthOfLog())
 		}
 	} else {
 		//todo
@@ -448,7 +451,7 @@ func (rf *Raft) checkAppendEntriesReply(i int, empty bool, ok bool, args *Append
 			}
 		}
 		// LogPrint(dTest, "Leader S%v how many follower update to maxMatchIndex %v", rf.me, count)
-		if count+1 > len(rf.peers)/2 && rf.log[maxMatchIndex].Term == rf.currentTerm {
+		if maxMatchIndex > 0 && count+1 > len(rf.peers)/2 && maxMatchIndex < len(rf.log) && rf.log[maxMatchIndex].Term == rf.currentTerm {
 			// rf.commitIndex = maxMatchIndex
 			rf.commitLog(maxMatchIndex)
 			LogPrint(dLeader, "========> S%v Commit index up to %v", rf.me, rf.commitIndex)
@@ -476,10 +479,10 @@ func (rf *Raft) sendAppendEntriesToIndex(i int, empty bool) {
 }
 
 func (rf *Raft) getLastLogTerm() int {
-	if len(rf.log) == 0 {
+	if len(rf.log) == 1 {
 		return 0
 	} else {
-		return rf.log[len(rf.log)].Term
+		return rf.log[len(rf.log)-1].Term
 	}
 }
 
@@ -500,7 +503,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	if args.Term > rf.currentTerm {
 		if rf.state != Follower {
-			rf.state = Follower
+			// rf.state = Follower
+			rf.changeStateToFollow()
 			rf.voteCount = 0
 			rf.missCount = 0
 		}
@@ -512,12 +516,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//least as up-to-date as receiver’s log, grant vot
 	canVote := false
 	LogPrint(dTest, "LastLogIndex = %v    lastTerm = %v   curTerm = %v  len(log) =%v logTerm = %v",
-		args.LastLogIndex, args.LastLogTerm, rf.currentTerm, len(rf.log), rf.getLastLogTerm())
+		args.LastLogIndex, args.LastLogTerm, rf.currentTerm, rf.lengthOfLog(), rf.getLastLogTerm())
 	if rf.votedFor == -1 {
-		if args.LastLogIndex == 0 && len(rf.log) == 0 {
+		if args.LastLogIndex == 0 && rf.lengthOfLog() == 1 {
 			canVote = true
 		} else if (args.LastLogTerm > rf.getLastLogTerm()) ||
-			(args.LastLogTerm == rf.getLastLogTerm() && args.LastLogIndex >= len(rf.log)) {
+			(args.LastLogTerm == rf.getLastLogTerm() && args.LastLogIndex >= rf.lengthOfLog()) {
 			canVote = true
 		}
 	}
@@ -531,6 +535,18 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		LogPrint(dVote, "S%v  already vote to -----> %v", rf.me, rf.votedFor)
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
+	}
+}
+
+//remove 0 item
+func (rf *Raft) lengthOfLog() int {
+	return len(rf.log) - 1
+}
+
+func (rf *Raft) changeStateToFollow() {
+	rf.state = Follower
+	if rf.commitIndex < rf.lengthOfLog() {
+		rf.log = rf.log[:rf.commitIndex+1]
 	}
 }
 
@@ -548,19 +564,22 @@ func (rf *Raft) OnAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesRep
 	if args.Term > rf.currentTerm {
 		if rf.state != Follower {
 			LogPrint(dInfo, "S%v on term %v. Change To term %v", rf.me, rf.currentTerm, args.Term)
-			rf.state = Follower
+			// rf.state = Follower
+			rf.changeStateToFollow()
 		}
 		rf.currentTerm = args.Term
 	}
 
 	if args.Term == rf.currentTerm && rf.state == Leader {
 		LogPrint(dInfo, "S2S, kill one. S%v on term %v. Change To term %v", rf.me, rf.currentTerm, args.Term)
-		rf.state = Follower
+		// rf.state = Follower
+		rf.changeStateToFollow()
 		rf.currentTerm = args.Term
 	}
 
 	if rf.state == Candidate {
-		rf.state = Follower
+		// rf.state = Follower
+		rf.changeStateToFollow()
 		rf.currentTerm = args.Term
 		reply.Term = rf.currentTerm
 		reply.Success = false
@@ -583,9 +602,9 @@ func (rf *Raft) OnAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesRep
 
 	//task 2 Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm
 	if args.PreLogIndex > 0 && args.PrevLogTerm > 0 &&
-		(args.PreLogIndex > len(rf.log) || (args.PreLogIndex <= len(rf.log) && rf.log[args.PreLogIndex].Term != args.PrevLogTerm)) {
-		LogPrint(dInfo, "S%v on term %v.PreLogIndex=>%v, PrevLogTerm=>%v,len(rf.log)=>%v,  preLog not exist  -- failed check 2 ",
-			rf.me, rf.currentTerm, args.PreLogIndex, args.PrevLogTerm, len(rf.log))
+		(args.PreLogIndex > rf.lengthOfLog() || (args.PreLogIndex <= rf.lengthOfLog() && rf.log[args.PreLogIndex].Term != args.PrevLogTerm)) {
+		LogPrint(dInfo, "S%v on term %v.PreLogIndex=>%v, PrevLogTerm=>%v,rf.lengthOfLog()=>%v,  preLog not exist  -- failed check 2 ",
+			rf.me, rf.currentTerm, args.PreLogIndex, args.PrevLogTerm, rf.lengthOfLog())
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
@@ -598,8 +617,12 @@ func (rf *Raft) OnAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesRep
 	if args.Entries != nil && len(args.Entries) > 0 {
 		for i, entry := range args.Entries {
 			index := i + args.PreLogIndex + 1
-			rf.log[index] = entry
-			LogPrint(dCommit, "S%v add log %v ->>>>>>>>>>>>>>>>>>>>>> update by leader", rf.me, index)
+			if index < len(rf.log) {
+				rf.log[index] = entry
+			} else {
+				rf.log = append(rf.log, entry)
+			}
+			LogPrint(dCommit, "S%v add log %v ->>>>>>>>>>>>>>>>>>>>>> update by leader   cmd --> %v", rf.me, index, entry.Cmd)
 		}
 	}
 
@@ -608,14 +631,14 @@ func (rf *Raft) OnAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesRep
 	// LogPrint(dTest, "S%v  ===>  args.LeaderCommit -> %v      rf.commitIndex -> %v", rf.me, args.LeaderCommit, rf.commitIndex)
 	if args.LeaderCommit > rf.commitIndex {
 		minValue := 0
-		if args.LeaderCommit < len(rf.log) {
+		if args.LeaderCommit < rf.lengthOfLog() {
 			minValue = args.LeaderCommit
 		} else {
-			minValue = len(rf.log)
+			minValue = rf.lengthOfLog()
 		}
 		rf.commitLog(minValue)
-		LogPrint(dLeader, "S%v Commit index up to %v --- by update to leader", rf.me, rf.commitIndex)
-		// rf.commitIndex = math.Min(args.LeaderCommit, len(rf.log)-1)
+		LogPrint(dLeader, "S%v Commit index up to %v --- by update to leader, rf.lengthOfLog()->%v", rf.me, rf.commitIndex, rf.lengthOfLog())
+		// rf.commitIndex = math.Min(args.LeaderCommit, rf.lengthOfLog()-1)
 	}
 
 	rf.currentTerm = args.Term
@@ -688,13 +711,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader = rf.state == Leader
 	if isLeader {
 		entry := Entry{Cmd: command, Term: rf.currentTerm}
-		// rf.log = append(rf.log, entry)
-		lastIndex := len(rf.log)
-		lastIndex++
-		rf.log[lastIndex] = entry
+		rf.log = append(rf.log, entry)
+		index = rf.lengthOfLog()
+		// // lastIndex++
+		// // rf.log[lastIndex] = entry
 		LogPrint(dCommit, "=========================================================================== %v", command)
-		LogPrint(dCommit, "S%v Leader add rf log write to index %v  on Term ------>%v", rf.me, lastIndex, rf.currentTerm)
-		index = lastIndex
+		LogPrint(dCommit, "S%v Leader add rf log write to index %v  on Term ------>%v", rf.me, index, rf.currentTerm)
 	} else {
 		return index, term, isLeader
 	}
@@ -739,7 +761,7 @@ func (rf *Raft) commitLog(index int) {
 		msg.CommandValid = true
 		msg.Command = rf.log[i].Cmd
 		msg.CommandIndex = i
-		LogPrint(dCommit, "commitLog  S%v   ------ commit id -> %v", rf.me, i)
+		LogPrint(dCommit, "commitLog  S%v   ------ commit id -> %v     cmd->%v", rf.me, i, msg.Command)
 		rf.applyCh <- msg
 	}
 
@@ -783,7 +805,7 @@ func (rf *Raft) candidateTick() {
 		for i := range rf.peers {
 			argsList[i].Term = rf.currentTerm
 			argsList[i].CandidateId = rf.me
-			lastIndex := len(rf.log)
+			lastIndex := rf.lengthOfLog()
 			argsList[i].LastLogIndex = lastIndex
 			if lastIndex > 0 {
 				argsList[i].LastLogTerm = rf.log[lastIndex].Term
@@ -868,7 +890,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.replyCount = 0
 	rf.missCount = 0
 
-	rf.log = map[int]Entry{}
+	// rf.log = map[int]Entry{}
+	rf.log = make([]Entry, 1)
+
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
