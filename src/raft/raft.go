@@ -545,7 +545,7 @@ func (rf *Raft) lengthOfLog() int {
 
 func (rf *Raft) changeStateToFollow() {
 	rf.state = Follower
-	if rf.commitIndex < rf.lengthOfLog() {
+	if rf.commitIndex < len(rf.log)-1 {
 		rf.log = rf.log[:rf.commitIndex+1]
 	}
 }
