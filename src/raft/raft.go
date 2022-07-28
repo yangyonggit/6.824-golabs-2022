@@ -167,7 +167,6 @@ type Raft struct {
 	voteCount        int
 	replyCount       int
 	missCount        int
-	appendReplyCount int
 }
 
 // return currentTerm and whether this server
@@ -263,7 +262,7 @@ type RequestVoteArgs struct {
 type RequestVoteReply struct {
 	// Your data here (2A).
 	Term        int
-	VoteGranted bool
+	VoteGranted int // 0 - not Granted. 1 - Voted .
 }
 
 type AppendEntriesArgs struct {
@@ -298,8 +297,9 @@ func (rf *Raft) requestVoteToIndex(i int, args RequestVoteArgs, reply RequestVot
 	} else {
 		rf.replyCount++
 
-		if reply.Term > rf.currentTerm {
-			LogPrint(dVote, "S%v c to f in request. ot = %v  nt = %v", rf.me, rf.currentTerm, reply.Term)
+		if reply.Term > rf.currentTerm || reply.VoteGranted < 0 {
+			LogPrint(dVote, "S%v c to f in request. ot = %v  nt = %v or VoteGranted = %v ",
+				rf.me, rf.currentTerm, reply.Term, reply.VoteGranted)
 			// rf.state = Follower
 			rf.changeStateToFollow()
 			rf.currentTerm = reply.Term
@@ -310,15 +310,14 @@ func (rf *Raft) requestVoteToIndex(i int, args RequestVoteArgs, reply RequestVot
 			return
 		}
 
-		if reply.VoteGranted {
-			rf.voteCount++
-			LogPrint(dVote, "S%v get vote from S%v. Vote is %v", rf.me, i, rf.voteCount)
-		}
+		rf.voteCount += reply.VoteGranted
+		LogPrint(dVote, "S%v get vote from S%v. Vote is %v", rf.me, i, rf.voteCount)
+
 	}
 
 	LogPrint(dVote, "========== S%v got %v votes from %v    &&&& miss count%v", rf.me, rf.voteCount, rf.replyCount, rf.missCount)
 
-	if rf.voteCount < 2 {
+	if rf.voteCount < 2 || rf.missCount+rf.replyCount+1 < len(rf.log) {
 		rf.mu.Unlock()
 		return
 	}
@@ -435,8 +434,12 @@ func (rf *Raft) checkAppendEntriesReply(i int, empty bool, ok bool, args *Append
 		}
 	} else {
 		//todo
-		if rf.nextIndex[i] > 0 {
+		lastTerm := rf.getLastLogTerm()
+		for rf.nextIndex[i] > 0 {
 			rf.nextIndex[i]--
+			if lastTerm != rf.log[rf.nextIndex[i]].Term {
+				break
+			}
 		}
 		// LogPrint(dTest, "S%v  --   %v     %v", rf.me, i, rf.nextIndex[i])
 	}
@@ -501,6 +504,16 @@ func (rf *Raft) getLastLogTerm() int {
 	}
 }
 
+func (rf *Raft) isCandidateLogLastest(index int, term int) bool {
+	if term > rf.getLastLogTerm() {
+		return true
+	} else if term == rf.getLastLogTerm() {
+		return index >= rf.lengthOfLog()
+	} else {
+		return false
+	}
+}
+
 //
 // example RequestVote RPC handler.
 //
@@ -512,7 +525,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
-		reply.VoteGranted = false
+		reply.VoteGranted = 0
 		return
 	}
 
@@ -529,27 +542,25 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	//If votedFor is null or candidateId, and candidate’s log is at
 	//least as up-to-date as receiver’s log, grant vot
-	canVote := false
-	LogPrint(dTest, "LastLogIndex = %v    lastTerm = %v   curTerm = %v  len(log) =%v logTerm = %v",
-		args.LastLogIndex, args.LastLogTerm, rf.currentTerm, rf.lengthOfLog(), rf.getLastLogTerm())
-	if rf.votedFor == -1 {
-		if args.LastLogIndex == 0 && rf.lengthOfLog() == 1 {
-			canVote = true
-		} else if (args.LastLogTerm > rf.getLastLogTerm()) ||
-			(args.LastLogTerm == rf.getLastLogTerm() && args.LastLogIndex >= rf.lengthOfLog()) {
-			canVote = true
-		}
-	}
+	LogPrint(dTest, "LastLogIndex = %v    lastTerm = %v   curTerm = %v  len(log) =%v logTerm = %v  ---->  %v",
+		args.LastLogIndex, args.LastLogTerm, rf.currentTerm, rf.lengthOfLog(), rf.getLastLogTerm(), rf.isCandidateLogLastest(args.LastLogIndex, args.LastLogTerm))
 
-	if canVote {
-		LogPrint(dVote, "S%v  vote for S%v", rf.me, args.CandidateId)
-		rf.votedFor = args.CandidateId
+	//不是最新的，一票否决
+	if !rf.isCandidateLogLastest(args.LastLogIndex, args.LastLogTerm) {
 		reply.Term = rf.currentTerm
-		reply.VoteGranted = true
+		reply.VoteGranted = -len(rf.peers)
+		return
 	} else {
-		LogPrint(dVote, "S%v  already vote to -----> %v", rf.me, rf.votedFor)
-		reply.Term = rf.currentTerm
-		reply.VoteGranted = false
+		if rf.votedFor == -1 {
+			LogPrint(dVote, "S%v  vote for S%v", rf.me, args.CandidateId)
+			rf.votedFor = args.CandidateId
+			reply.Term = rf.currentTerm
+			reply.VoteGranted = 1
+		} else {
+			LogPrint(dVote, "S%v  already vote to -----> %v", rf.me, rf.votedFor)
+			reply.Term = rf.currentTerm
+			reply.VoteGranted = 0
+		}
 	}
 }
 
@@ -837,7 +848,8 @@ func (rf *Raft) candidateTick() {
 		}
 		rf.mu.Unlock()
 		rf.RequestOthersVoteMe(argsList, replyList)
-		waitTime = rand.Intn(ElectionMaxWait-ElectionMinWait) + ElectionMinWait*2
+		// waitTime = rand.Intn(ElectionMaxWait-ElectionMinWait) + ElectionMaxWait
+		waitTime = ElectionMaxWait
 		time.Sleep(time.Duration(waitTime * int(time.Millisecond)))
 		return
 	}
