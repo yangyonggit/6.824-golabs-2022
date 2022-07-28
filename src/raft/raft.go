@@ -315,7 +315,7 @@ func (rf *Raft) requestVoteToIndex(i int, args RequestVoteArgs, reply RequestVot
 
 	}
 
-	LogPrint(dVote, "========== S%v got %v votes from %v    &&&& miss count%v", rf.me, rf.voteCount, rf.replyCount, rf.missCount)
+	LogPrint(dVote, "========== S%v got %v votes from %v    &&&& miss count%v    on term=%v", rf.me, rf.voteCount, rf.replyCount, rf.missCount, rf.currentTerm)
 
 	if rf.voteCount < 2 || rf.missCount+rf.replyCount+1 < len(rf.log) {
 		rf.mu.Unlock()
@@ -521,7 +521,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	LogPrint(dVote, "S%v in stage %v recive from S%v request vote in stage %v.   ----  Vote is %v", rf.me, rf.currentTerm, args.CandidateId, args.Term, rf.votedFor)
+	LogPrint(dVote, "S%v in stage %v recive from S%v request vote in stage %v.   ----  Vote is %v   ==> %v",
+		rf.me, rf.currentTerm, args.CandidateId, args.Term, rf.votedFor, rf.isCandidateLogLastest(args.LastLogIndex, args.LastLogTerm))
 
 	//不是最新的，一票否决
 	if !rf.isCandidateLogLastest(args.LastLogIndex, args.LastLogTerm) {
