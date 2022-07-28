@@ -523,6 +523,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.mu.Unlock()
 	LogPrint(dVote, "S%v in stage %v recive from S%v request vote in stage %v.   ----  Vote is %v", rf.me, rf.currentTerm, args.CandidateId, args.Term, rf.votedFor)
 
+	//不是最新的，一票否决
+	if !rf.isCandidateLogLastest(args.LastLogIndex, args.LastLogTerm) {
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = -len(rf.peers)
+		return
+	}
+
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = 0
@@ -545,23 +552,17 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	LogPrint(dTest, "LastLogIndex = %v    lastTerm = %v   curTerm = %v  len(log) =%v logTerm = %v  ---->  %v",
 		args.LastLogIndex, args.LastLogTerm, rf.currentTerm, rf.lengthOfLog(), rf.getLastLogTerm(), rf.isCandidateLogLastest(args.LastLogIndex, args.LastLogTerm))
 
-	//不是最新的，一票否决
-	if !rf.isCandidateLogLastest(args.LastLogIndex, args.LastLogTerm) {
+	if rf.votedFor == -1 {
+		LogPrint(dVote, "S%v  vote for S%v", rf.me, args.CandidateId)
+		rf.votedFor = args.CandidateId
 		reply.Term = rf.currentTerm
-		reply.VoteGranted = -len(rf.peers)
-		return
+		reply.VoteGranted = 1
 	} else {
-		if rf.votedFor == -1 {
-			LogPrint(dVote, "S%v  vote for S%v", rf.me, args.CandidateId)
-			rf.votedFor = args.CandidateId
-			reply.Term = rf.currentTerm
-			reply.VoteGranted = 1
-		} else {
-			LogPrint(dVote, "S%v  already vote to -----> %v", rf.me, rf.votedFor)
-			reply.Term = rf.currentTerm
-			reply.VoteGranted = 0
-		}
+		LogPrint(dVote, "S%v  already vote to -----> %v", rf.me, rf.votedFor)
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = 0
 	}
+
 }
 
 //remove 0 item
@@ -848,9 +849,9 @@ func (rf *Raft) candidateTick() {
 		}
 		rf.mu.Unlock()
 		rf.RequestOthersVoteMe(argsList, replyList)
-		// waitTime = rand.Intn(ElectionMaxWait-ElectionMinWait) + ElectionMaxWait
-		waitTime = ElectionMaxWait
-		time.Sleep(time.Duration(waitTime * int(time.Millisecond)))
+		// waitTime = rand.Intn(ElectionMaxWait-ElectionMinWait) + ElectionMinWait
+		// waitTime = ElectionMaxWait
+		// time.Sleep(time.Duration(waitTime * int(time.Millisecond)))
 		return
 	}
 
