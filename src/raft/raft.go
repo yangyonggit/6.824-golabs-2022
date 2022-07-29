@@ -853,6 +853,7 @@ func (rf *Raft) commitTick() {
 		// todo aplply log[lastApplied] to state machine
 
 	}
+	rf.persist()
 }
 
 func (rf *Raft) commitLog(index int) {
@@ -867,6 +868,7 @@ func (rf *Raft) commitLog(index int) {
 	}
 
 	rf.commitIndex = index
+	rf.persist()
 }
 
 func (rf *Raft) followerTick() {
