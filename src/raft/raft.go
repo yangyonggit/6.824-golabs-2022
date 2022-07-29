@@ -19,6 +19,7 @@ package raft
 
 import (
 	//	"bytes"
+	"bytes"
 	"fmt"
 	"log"
 	"math/rand"
@@ -29,6 +30,7 @@ import (
 	"time"
 
 	//	"6.824/labgob"
+	"6.824/labgob"
 	"6.824/labrpc"
 )
 
@@ -200,6 +202,27 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	LogPrint(dPersist, "===============================================================")
+	LogPrint(dPersist, "S%v is writing Persist", rf.me)
+
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.commitIndex)
+	e.Encode(rf.lastApplied)
+	e.Encode(rf.lengthOfLog())
+	LogPrint(dPersist, "S%v is writing currentTerm=%v       votedFor=%v  len(rf.log)=%v",
+		rf.me, rf.currentTerm, rf.votedFor, rf.lengthOfLog())
+	for i := 1; i < len(rf.log); i++ {
+		e.Encode(rf.log[i].Term)
+		val, _ := rf.log[i].Cmd.(int)
+		LogPrint(dPersist, "S%v is writing entry: term = %v   cmd = %v  ", rf.me, rf.log[i].Term, val)
+		e.Encode(val)
+	}
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
+	LogPrint(dPersist, "===============================================================")
 }
 
 //
@@ -222,6 +245,34 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+
+	// rf.mu.Lock()
+	// defer rf.mu.Unlock()
+	rf.log = make([]Entry, 1)
+	LogPrint(dPersist, "---------------------------------------------------------")
+	LogPrint(dPersist, "S%v is reading Persist", rf.me)
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+
+	d.Decode(&rf.currentTerm)
+	d.Decode(&rf.votedFor)
+	d.Decode(&rf.commitIndex)
+	d.Decode(&rf.lastApplied)
+	logCount := 0
+	d.Decode(&logCount)
+
+	LogPrint(dPersist, "S%v is reading Persist TERM=%v   votedFor=%v  logCount=%v", rf.me, rf.currentTerm, rf.votedFor, logCount)
+	for i := 0; i < logCount; i++ {
+		entry := Entry{}
+		d.Decode(&entry.Term)
+		val := 0
+		d.Decode(&val)
+		var cmd interface{} = val
+		entry.Cmd = cmd
+		rf.log = append(rf.log, entry)
+		LogPrint(dPersist, "S%v is reading entry term=%v   cmd=%v", rf.me, entry.Term, val)
+	}
+	LogPrint(dPersist, "---------------------------------------------------------")
 }
 
 //
@@ -310,6 +361,7 @@ func (rf *Raft) requestVoteToIndex(i int, args RequestVoteArgs, reply RequestVot
 			if reply.VoteGranted < 0 {
 				rf.lastestLog = false
 			}
+			rf.persist()
 			rf.mu.Unlock()
 			return
 		}
@@ -427,6 +479,7 @@ func (rf *Raft) checkAppendEntriesReply(i int, empty bool, ok bool, args *Append
 		rf.voteCount = 0
 		rf.votedFor = -1
 		rf.missCount = 0
+		rf.persist()
 		rf.mu.Unlock()
 		return
 	}
@@ -551,6 +604,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		}
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
+		rf.persist()
 	}
 
 	//If votedFor is null or candidateId, and candidate’s log is at
@@ -568,7 +622,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = 0
 	}
-
+	rf.persist()
 }
 
 //remove 0 item
@@ -582,6 +636,7 @@ func (rf *Raft) changeStateToFollow() {
 	if rf.commitIndex < rf.lengthOfLog()-1 {
 		rf.log = rf.log[:rf.commitIndex+1]
 	}
+	rf.persist()
 }
 
 //
@@ -603,6 +658,7 @@ func (rf *Raft) OnAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesRep
 			rf.changeStateToFollow()
 		}
 		rf.currentTerm = args.Term
+		rf.persist()
 	}
 
 	if args.Term == rf.currentTerm && rf.state == Leader {
@@ -610,6 +666,7 @@ func (rf *Raft) OnAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesRep
 		// rf.state = Follower
 		rf.changeStateToFollow()
 		rf.currentTerm = args.Term
+		rf.persist()
 	}
 
 	if rf.state == Candidate {
@@ -618,6 +675,7 @@ func (rf *Raft) OnAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesRep
 		rf.currentTerm = args.Term
 		reply.Term = rf.currentTerm
 		reply.Success = false
+		rf.persist()
 		return
 	}
 
@@ -661,6 +719,7 @@ func (rf *Raft) OnAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesRep
 			LogPrint(dCommit, "S%v add log %v ->>>>>>>>>>>>>>>>>>>>>> update by leader   S%v cmd --> %v ||||  curTerm %v   leaderTerm %v",
 				rf.me, index, args.Leader, entry.Cmd, args.Term, rf.currentTerm)
 		}
+		rf.persist()
 	}
 
 	//task 5,If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
@@ -683,6 +742,7 @@ func (rf *Raft) OnAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesRep
 	rf.currentTerm = args.Term
 	reply.Term = args.Term
 	reply.Success = true
+	rf.persist()
 }
 
 //
@@ -754,6 +814,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		index = rf.lengthOfLog()
 		// // lastIndex++
 		// // rf.log[lastIndex] = entry
+		rf.persist()
 		LogPrint(dCommit, "=========================================================================== %v", command)
 		LogPrint(dCommit, "S%v Leader add rf log write to index %v  on Term ------>%v", rf.me, index, rf.currentTerm)
 	} else {
@@ -854,6 +915,7 @@ func (rf *Raft) candidateTick() {
 			}
 
 		}
+		rf.persist()
 		rf.mu.Unlock()
 		rf.RequestOthersVoteMe(argsList, replyList)
 		// waitTime = rand.Intn(ElectionMaxWait-ElectionMinWait) + ElectionMinWait
