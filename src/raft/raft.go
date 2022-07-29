@@ -167,6 +167,7 @@ type Raft struct {
 	voteCount        int
 	replyCount       int
 	missCount        int
+	lastestLog       bool
 }
 
 // return currentTerm and whether this server
@@ -306,6 +307,9 @@ func (rf *Raft) requestVoteToIndex(i int, args RequestVoteArgs, reply RequestVot
 			rf.votedFor = -1
 			rf.voteCount = 0
 			rf.missCount = 0
+			if reply.VoteGranted < 0 {
+				rf.lastestLog = false
+			}
 			rf.mu.Unlock()
 			return
 		}
@@ -315,9 +319,10 @@ func (rf *Raft) requestVoteToIndex(i int, args RequestVoteArgs, reply RequestVot
 
 	}
 
-	LogPrint(dVote, "========== S%v got %v votes from %v    &&&& miss count%v    on term=%v", rf.me, rf.voteCount, rf.replyCount, rf.missCount, rf.currentTerm)
+	LogPrint(dVote, "========== S%v got %v votes from %v    &&&& miss count%v    on term=%v",
+		rf.me, rf.voteCount, rf.replyCount, rf.missCount, rf.currentTerm)
 
-	if rf.voteCount < 2 || rf.missCount+rf.replyCount+1 < len(rf.log) {
+	if rf.voteCount < 2 || rf.replyCount+rf.missCount+1 <= len(rf.peers)/2 {
 		rf.mu.Unlock()
 		return
 	}
@@ -327,7 +332,7 @@ func (rf *Raft) requestVoteToIndex(i int, args RequestVoteArgs, reply RequestVot
 	if rf.voteCount == len(rf.peers)-1 {
 		LogPrint(dVote, "S%v became a leader!!!!!!!!  validCount=%v voteCount=%v", rf.me, validCount, rf.voteCount)
 		rf.doLeaderInit()
-	} else if rf.voteCount > validCount/2 {
+	} else if rf.voteCount > len(rf.peers)/2 {
 		LogPrint(dVote, "S%v became a leader!!!!!!!!  validCount=%v voteCount=%v", rf.me, validCount, rf.voteCount)
 		rf.doLeaderInit()
 	}
@@ -434,10 +439,10 @@ func (rf *Raft) checkAppendEntriesReply(i int, empty bool, ok bool, args *Append
 		}
 	} else {
 		//todo
-		lastTerm := rf.getLastLogTerm()
 		for rf.nextIndex[i] > 0 {
+			lastLogTerm := rf.log[rf.nextIndex[i]].Term
 			rf.nextIndex[i]--
-			if lastTerm != rf.log[rf.nextIndex[i]].Term {
+			if lastLogTerm != rf.log[rf.nextIndex[i]].Term {
 				break
 			}
 		}
@@ -588,6 +593,7 @@ func (rf *Raft) OnAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesRep
 	// LogPrint(dVote, "S%v  on term %v recive AppendEntries From Leader S%v on term %v", rf.me, rf.currentTerm, args.Leader, args.Term)
 	rf.lastReciveTime = time.Now()
 	rf.alreadRecivedRpc = true
+	rf.lastestLog = true
 
 	//common check
 	if args.Term > rf.currentTerm {
@@ -827,7 +833,7 @@ func (rf *Raft) candidateTick() {
 	time.Sleep(time.Duration(waitTime * int(time.Millisecond)))
 	rf.mu.Lock()
 
-	if rf.state == Candidate {
+	if rf.state == Candidate && rf.lastestLog {
 		rf.currentTerm++
 		rf.votedFor = rf.me
 		rf.voteCount = 1
@@ -924,7 +930,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.voteCount = 0
 	rf.replyCount = 0
 	rf.missCount = 0
-
+	rf.lastestLog = true
 	// rf.log = map[int]Entry{}
 	rf.log = make([]Entry, 1)
 
