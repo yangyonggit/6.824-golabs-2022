@@ -19,6 +19,7 @@ package raft
 
 import (
 	//	"bytes"
+
 	"bytes"
 	"fmt"
 	"log"
@@ -30,6 +31,7 @@ import (
 	"time"
 
 	//	"6.824/labgob"
+
 	"6.824/labgob"
 	"6.824/labrpc"
 )
@@ -246,8 +248,8 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.yyy = yyy
 	// }
 
-	// rf.mu.Lock()
-	// defer rf.mu.Unlock()
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	rf.log = make([]Entry, 1)
 	LogPrint(dPersist, "---------------------------------------------------------")
 	LogPrint(dPersist, "S%v is reading Persist", rf.me)
@@ -324,6 +326,7 @@ type AppendEntriesArgs struct {
 	PrevLogTerm  int
 	Entries      []Entry
 	LeaderCommit int
+	Empty        bool
 }
 
 type AppendEntriesReply struct {
@@ -394,7 +397,7 @@ func (rf *Raft) requestVoteToIndex(i int, args RequestVoteArgs, reply RequestVot
 }
 
 func (rf *Raft) doLeaderInit() {
-	LogPrint(dLeader, "S%v is Leader. Do init......", rf.me)
+	LogPrint(dLeader, "S%v is Leader. Do init...... len of log =%v     commitIndex = %v", rf.me, rf.lengthOfLog(), rf.commitIndex)
 	rf.state = Leader
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
@@ -430,31 +433,27 @@ func (rf *Raft) buildAppendEntriesArgs(i int, empty bool) *AppendEntriesArgs {
 	args := AppendEntriesArgs{}
 	args.Leader = rf.me
 	args.Term = rf.currentTerm
+	args.Entries = make([]Entry, 0)
+	args.Empty = empty
 	if !empty {
 		logRepicationCount := rf.lengthOfLog() - rf.nextIndex[i]
 		// LogPrint(dTest, "logRepicationCount %v      len->%v    next->%v", logRepicationCount, rf.lengthOfLog(), rf.nextIndex[i])
+		// LogPrint(dTest, "S%v build append to S%v,  rf.NextIndex->%v len of log->%v  send->%v", rf.me, i, rf.nextIndex[i], rf.lengthOfLog(), len(args.Entries))
 		if logRepicationCount > 0 {
-			args.Entries = make([]Entry, 0)
 			for i := rf.nextIndex[i] + 1; i <= rf.lengthOfLog(); i++ {
 				args.Entries = append(args.Entries, rf.log[i])
 			}
-
-			// copy(args.Entries, rf.log[rf.nextIndex[i]:])
-			LogPrint(dTest, "S%v build append to S%v,  rf.NextIndex->%v len of log->%v  send->%v", rf.me, i, rf.nextIndex[i], rf.lengthOfLog(), len(args.Entries))
-			args.PreLogIndex = rf.nextIndex[i]
-			if args.PreLogIndex > 0 {
-				args.PrevLogTerm = rf.log[args.PreLogIndex].Term
-			} else {
-				args.PrevLogTerm = 0
-			}
-			args.LeaderCommit = rf.commitIndex
-		} else {
-			args.Entries = nil
-			args.PreLogIndex = 0
-			args.PrevLogTerm = 0
-			args.LeaderCommit = rf.commitIndex
 		}
 	}
+	LogPrint(dTest, "S%v build append to S%v,  rf.NextIndex->%v len of log->%v  send->%v  isNul->%v",
+		rf.me, i, rf.nextIndex[i], rf.lengthOfLog(), len(args.Entries), args.Entries == nil)
+	args.PreLogIndex = rf.nextIndex[i]
+	if args.PreLogIndex > 0 {
+		args.PrevLogTerm = rf.log[args.PreLogIndex].Term
+	} else {
+		args.PrevLogTerm = 0
+	}
+	args.LeaderCommit = rf.commitIndex
 	return &args
 }
 
@@ -502,7 +501,7 @@ func (rf *Raft) tryCommitCurTerm(i int) {
 			rf.commitLog(i)
 			LogPrint(dCommit, "===============================================================================")
 			LogPrint(dLeader, "========> S%v Commit index up to %v", rf.me, rf.commitIndex)
-			LogPrint(dLeader, "-----------------------------------------------------------------------")
+			LogPrint(dLeader, "===============================================================================")
 		} else {
 			break
 		}
@@ -535,25 +534,25 @@ func (rf *Raft) checkAppendEntriesReply(i int, empty bool, ok bool, args *Append
 		return
 	}
 
-	if reply.Success {
-		if args.Entries != nil && len(args.Entries) > 0 {
+	if !args.Empty {
+		if reply.Success {
 			rf.nextIndex[i] += len(args.Entries)
 			rf.matchIndex[i] += len(args.Entries)
 			LogPrint(dLeader, "Leader up date index ====== S%v  <--  S%v     next->%v match->%v len->%v", rf.me, i, rf.nextIndex[i], rf.matchIndex[i], rf.lengthOfLog())
-		}
-	} else {
-		//todo
-		for rf.nextIndex[i] > 0 {
-			lastLogTerm := rf.log[rf.nextIndex[i]].Term
-			rf.nextIndex[i]--
-			if lastLogTerm != rf.log[rf.nextIndex[i]].Term {
-				break
+		} else {
+			//todo
+			for rf.nextIndex[i] > 0 {
+				lastLogTerm := rf.log[rf.nextIndex[i]].Term
+				rf.nextIndex[i]--
+				if lastLogTerm != rf.log[rf.nextIndex[i]].Term {
+					break
+				}
 			}
+			// LogPrint(dTest, "S%v  --   %v     %v", rf.me, i, rf.nextIndex[i])
 		}
-		// LogPrint(dTest, "S%v  --   %v     %v", rf.me, i, rf.nextIndex[i])
-	}
 
-	rf.tryCommitCurTerm(i)
+		rf.tryCommitCurTerm(i)
+	}
 
 	rf.mu.Unlock()
 }
@@ -651,10 +650,10 @@ func (rf *Raft) lengthOfLog() int {
 
 func (rf *Raft) changeStateToFollow() {
 	rf.state = Follower
-	LogPrint(dTest, "S%v  ------ remove uncommit log commit%v   len%v", rf.me, rf.commitIndex, rf.lengthOfLog())
-	if rf.commitIndex < rf.lengthOfLog()-1 {
-		rf.log = rf.log[:rf.commitIndex+1]
-	}
+	// LogPrint(dTest, "S%v  ------ remove uncommit log commit%v   len%v", rf.me, rf.commitIndex, rf.lengthOfLog())
+	// if rf.commitIndex < rf.lengthOfLog()-1 {
+	// 	rf.log = rf.log[:rf.commitIndex+1]
+	// }
 	rf.votedFor = -1
 	rf.persist()
 }
@@ -708,59 +707,61 @@ func (rf *Raft) OnAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesRep
 		return
 	}
 
-	// if args.Entries == nil || len(args.Entries) == 0 {
-	// 	reply.Term = rf.currentTerm
-	// 	reply.Success = true
-	// 	return
-	// }
+	if !args.Empty {
+		//task 2 Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm
+		LogPrint(dInfo, "S%v on term %v.PreLogIndex=>%v, PrevLogTerm=>%v,rf.lengthOfLog()=>%v  ---- leader is S%v",
+			rf.me, rf.currentTerm, args.PreLogIndex, args.PrevLogTerm, rf.lengthOfLog(), args.Leader)
+		if args.PreLogIndex > 0 && args.PrevLogTerm > 0 &&
+			(args.PreLogIndex > rf.lengthOfLog() || (args.PreLogIndex <= rf.lengthOfLog() && rf.log[args.PreLogIndex].Term != args.PrevLogTerm)) {
+			LogPrint(dInfo, "S%v on term %v.PreLogIndex=>%v, PrevLogTerm=>%v,rf.lengthOfLog()=>%v,  preLog not exist  -- failed check 2 ",
+				rf.me, rf.currentTerm, args.PreLogIndex, args.PrevLogTerm, rf.lengthOfLog())
+			reply.Term = rf.currentTerm
+			reply.Success = false
+			return
+		}
+		//task 3:If an existing entry conflicts with a new one (same index
+		//but different terms), delete the existing entry and all that
+		//follow it (§5.3
+		//task 5:Append any new entries not already in the log
+		if rf.lengthOfLog() > args.PreLogIndex {
+			rf.log = rf.log[:args.PreLogIndex+1]
+		}
 
-	//task 2 Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm
-	if args.PreLogIndex > 0 && args.PrevLogTerm > 0 &&
-		(args.PreLogIndex > rf.lengthOfLog() || (args.PreLogIndex <= rf.lengthOfLog() && rf.log[args.PreLogIndex].Term != args.PrevLogTerm)) {
-		LogPrint(dInfo, "S%v on term %v.PreLogIndex=>%v, PrevLogTerm=>%v,rf.lengthOfLog()=>%v,  preLog not exist  -- failed check 2 ",
-			rf.me, rf.currentTerm, args.PreLogIndex, args.PrevLogTerm, rf.lengthOfLog())
-		reply.Term = rf.currentTerm
-		reply.Success = false
-		return
-	}
-
-	//task 3:If an existing entry conflicts with a new one (same index
-	//but different terms), delete the existing entry and all that
-	//follow it (§5.3
-	//task 5:Append any new entries not already in the log
-	if args.Entries != nil && len(args.Entries) > 0 {
-		for i, entry := range args.Entries {
-			index := i + args.PreLogIndex + 1
-			if index < len(rf.log) {
-				rf.log[index] = entry
-			} else {
-				rf.log = append(rf.log, entry)
-			}
+		for _, entry := range args.Entries {
+			// index := i + args.PreLogIndex + 1
+			// if index < len(rf.log) {
+			// 	rf.log[index] = entry
+			// } else {
+			// 	rf.log = append(rf.log, entry)
+			// }
+			rf.log = append(rf.log, entry)
 			LogPrint(dCommit, "S%v add log %v ->>>>>>>>>>>>>>>>>>>>>> update by leader   S%v cmd --> %v ||||  curTerm %v   leaderTerm %v",
-				rf.me, index, args.Leader, entry.Cmd, args.Term, rf.currentTerm)
+				rf.me, rf.lengthOfLog(), args.Leader, entry.Cmd, args.Term, rf.currentTerm)
 		}
 		rf.persist()
-	}
 
-	//task 5,If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
+		//task 5,If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
 
-	// LogPrint(dTest, "S%v  ===>  args.LeaderCommit -> %v      rf.commitIndex -> %v", rf.me, args.LeaderCommit, rf.commitIndex)
-	if args.LeaderCommit > rf.commitIndex {
-		minValue := 0
-		if args.LeaderCommit < rf.lengthOfLog() {
-			minValue = args.LeaderCommit
-		} else {
-			minValue = rf.lengthOfLog()
-		}
-		for i := rf.commitIndex + 1; i <= minValue; i++ {
-			if rf.log[i].Term <= rf.currentTerm {
-				LogPrint(dCommit, "----------------------------------------------------------------------")
-				rf.commitLog(i)
-				LogPrint(dCommit, "----------------------------------------------------------------------")
-				LogPrint(dLeader, "S%v Commit index up to %v --- by update to leader, rf.lengthOfLog()->%v", rf.me, rf.commitIndex, rf.lengthOfLog())
+		LogPrint(dTest, "S%v  ===>  args.LeaderCommit -> %v      rf.commitIndex -> %v", rf.me, args.LeaderCommit, rf.commitIndex)
+		if args.LeaderCommit > rf.commitIndex {
+			minValue := 0
+			if args.LeaderCommit < rf.lengthOfLog() {
+				minValue = args.LeaderCommit
+			} else {
+				minValue = rf.lengthOfLog()
 			}
+			for i := rf.commitIndex + 1; i <= minValue; i++ {
+				if rf.log[i].Term <= rf.currentTerm {
+					LogPrint(dCommit, "----------------------------------------------------------------------")
+					rf.commitLog(i)
+					LogPrint(dCommit, "----------------------------------------------------------------------")
+					LogPrint(dLeader, "S%v Commit index up to %v --- by update to leader, rf.lengthOfLog()->%v", rf.me, rf.commitIndex, rf.lengthOfLog())
+				}
+			}
+			// rf.commitIndex = math.Min(args.LeaderCommit, rf.lengthOfLog()-1)
 		}
-		// rf.commitIndex = math.Min(args.LeaderCommit, rf.lengthOfLog()-1)
+	} else {
+		LogPrint(dInfo, "?????????????????????????????????????????????????")
 	}
 
 	rf.currentTerm = args.Term
