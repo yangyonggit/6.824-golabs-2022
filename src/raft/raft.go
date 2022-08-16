@@ -358,9 +358,6 @@ func (rf *Raft) requestVoteToIndex(i int, args RequestVoteArgs, reply RequestVot
 			// rf.state = Follower
 			rf.changeStateToFollow()
 			rf.currentTerm = reply.Term
-			rf.votedFor = -1
-			rf.voteCount = 0
-			rf.missCount = 0
 			if reply.VoteGranted < 0 {
 				rf.lastestLog = false
 			}
@@ -486,6 +483,7 @@ func (rf *Raft) tryCommitCurTerm(i int) {
 	firstIndex := rf.firstIndexOfTerm(rf.currentTerm)
 
 	if firstIndex > rf.commitIndex+1 {
+		LogPrint(dInfo, "tryCommitCurTerm  fucked .... S%v", rf.me)
 		rf.changeStateToFollow()
 		return
 	}
@@ -495,13 +493,14 @@ func (rf *Raft) tryCommitCurTerm(i int) {
 	}
 
 	// firstIndex := rf.commitIndex + 1
+	LogPrint(dCommit, "S%v tryCommitCurTerm %v    firstIndex=%v  len=%v", rf.me, i, firstIndex, rf.lengthOfLog())
 	for i := firstIndex; i <= rf.lengthOfLog(); i++ {
-		if rf.isLogMatched(i) && rf.log[i].Term == rf.currentTerm {
+		if rf.isLogMatched(i) {
 			LogPrint(dCommit, "===============================================================================")
 			rf.commitLog(i)
 			LogPrint(dCommit, "===============================================================================")
-			LogPrint(dLeader, "========> S%v Commit index up to %v", rf.me, rf.commitIndex)
-			LogPrint(dLeader, "===============================================================================")
+			LogPrint(dCommit, "========> S%v Commit index up to %v", rf.me, rf.commitIndex)
+			LogPrint(dCommit, "===============================================================================")
 		} else {
 			break
 		}
@@ -526,9 +525,6 @@ func (rf *Raft) checkAppendEntriesReply(i int, empty bool, ok bool, args *Append
 		// rf.state = Follower
 		rf.changeStateToFollow()
 		rf.currentTerm = reply.Term
-		rf.voteCount = 0
-		rf.votedFor = -1
-		rf.missCount = 0
 		rf.persist()
 		rf.mu.Unlock()
 		return
@@ -548,7 +544,7 @@ func (rf *Raft) checkAppendEntriesReply(i int, empty bool, ok bool, args *Append
 					break
 				}
 			}
-			// LogPrint(dTest, "S%v  --   %v     %v", rf.me, i, rf.nextIndex[i])
+			LogPrint(dTest, "S%v Try find match id %v for S%v", rf.me, rf.nextIndex[i], i)
 		}
 
 		rf.tryCommitCurTerm(i)
@@ -617,8 +613,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		if rf.state != Follower {
 			// rf.state = Follower
 			rf.changeStateToFollow()
-			rf.voteCount = 0
-			rf.missCount = 0
 		}
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
@@ -650,11 +644,13 @@ func (rf *Raft) lengthOfLog() int {
 
 func (rf *Raft) changeStateToFollow() {
 	rf.state = Follower
-	// LogPrint(dTest, "S%v  ------ remove uncommit log commit%v   len%v", rf.me, rf.commitIndex, rf.lengthOfLog())
+	LogPrint(dTest, "S%v  ------ change to follow term %v", rf.me, rf.currentTerm)
 	// if rf.commitIndex < rf.lengthOfLog()-1 {
 	// 	rf.log = rf.log[:rf.commitIndex+1]
 	// }
 	rf.votedFor = -1
+	rf.voteCount = 0
+	rf.missCount = 0
 	rf.persist()
 }
 
@@ -690,6 +686,7 @@ func (rf *Raft) OnAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesRep
 
 	if rf.state == Candidate {
 		// rf.state = Follower
+		LogPrint(dInfo, "S%v on term %v. Change To term %v, state == Candidate", rf.me, rf.currentTerm)
 		rf.changeStateToFollow()
 		rf.currentTerm = args.Term
 		reply.Term = rf.currentTerm
@@ -897,20 +894,27 @@ func (rf *Raft) followerTick() {
 	waitTime := rand.Intn(ElectionMaxWait-ElectionMinWait) + ElectionMinWait
 	time.Sleep(time.Duration(waitTime * int(time.Millisecond)))
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+
 	if rf.state != Follower {
+		rf.mu.Unlock()
 		return
 	}
 
-	if !rf.alreadRecivedRpc {
-		rf.state = Candidate
-	} else {
-		now := time.Now()
-		if now.Sub(rf.lastReciveTime) > time.Duration(HeartBeatTimeOut*int(time.Millisecond)) {
-			rf.alreadRecivedRpc = false
-			LogPrint(dVote, "S%v failed connect to Leader.", rf.me)
+	if rf.lastestLog {
+		if !rf.alreadRecivedRpc {
+			rf.state = Candidate
+		} else {
+			now := time.Now()
+			if now.Sub(rf.lastReciveTime) > time.Duration(HeartBeatTimeOut*int(time.Millisecond)) {
+				rf.alreadRecivedRpc = false
+				LogPrint(dVote, "S%v failed connect to Leader.", rf.me)
+			}
 		}
+	} else {
+		time.Sleep(time.Duration(waitTime * 2 * int(time.Millisecond)))
+		rf.lastestLog = true
 	}
+	rf.mu.Unlock()
 }
 
 func (rf *Raft) candidateTick() {
@@ -918,7 +922,7 @@ func (rf *Raft) candidateTick() {
 	time.Sleep(time.Duration(waitTime * int(time.Millisecond)))
 	rf.mu.Lock()
 
-	if rf.state == Candidate && rf.lastestLog {
+	if rf.state == Candidate {
 		rf.currentTerm++
 		rf.votedFor = rf.me
 		rf.voteCount = 1
@@ -945,6 +949,7 @@ func (rf *Raft) candidateTick() {
 		// waitTime = rand.Intn(ElectionMaxWait-ElectionMinWait) + ElectionMinWait
 		// waitTime = ElectionMaxWait
 		// time.Sleep(time.Duration(waitTime * int(time.Millisecond)))
+
 		return
 	}
 
